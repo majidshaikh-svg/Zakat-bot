@@ -1,378 +1,310 @@
-import os
-import json
-import logging
-import tempfile
+import os, json, logging, tempfile, base64, urllib.request, time, re
 import anthropic
-import gspread
-import httpx
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
-from google.oauth2.service_account import Credentials
 
-# ── Logging ────────────────────────────────────────────────────────
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Config ─────────────────────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
-CLAUDE_API_KEY   = os.environ["CLAUDE_API_KEY"]
-SHEET_ID         = os.environ["SHEET_ID"]
-ALLOWED_USER_ID  = int(os.environ.get("ALLOWED_USER_ID", "0"))  # Your Telegram user ID
-GOOGLE_CREDS     = os.environ["GOOGLE_CREDS"]  # JSON string of service account credentials
+TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
+ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
+SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbzzE1itHnJ87R_ffxE5ZcRYth0Ds0_OOj46XGGjvW0gAi7CiE47L4ruTehZrefNY7uD/exec"
+CATEGORIES      = ["Zakat", "Khair", "Asanee"]
 
-CATEGORIES = ["Zakat", "Khair", "Aasanee"]
-
-# ── Google Sheets ──────────────────────────────────────────────────
-def get_sheet():
-    creds_dict = json.loads(GOOGLE_CREDS)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(SHEET_ID).get_worksheet(0)
+CAT_MAP = {
+    "zakat":"Zakat","zakt":"Zakat","zakaat":"Zakat",
+    "khair":"Khair","khiur":"Khair","kher":"Khair","hair":"Khair",
+    "asanee":"Asanee","aasanee":"Asanee","asani":"Asanee","aasani":"Asanee","asane":"Asanee"
+}
 
 def get_balances():
-    sheet = get_sheet()
-    rows = sheet.get_all_values()
-    balances = {cat: 0 for cat in CATEGORIES}
-    for row in rows[1:]:  # skip header
-        if len(row) >= 3:
-            # Handle both column layouts
-            if row[2] in CATEGORIES:
-                category = row[2]
-                try:
-                    amount = float(str(row[1]).replace(",", ""))
-                    balances[category] += amount
-                except:
-                    pass
-            elif len(row) >= 4 and row[3] in CATEGORIES:
-                category = row[3]
-                try:
-                    amount = float(str(row[1]).replace(",", ""))
-                    balances[category] += amount
-                except:
-                    pass
-    return balances
+    url = SCRIPT_URL + "?t=" + str(int(time.time()))
+    with urllib.request.urlopen(url, timeout=15) as r:
+        rows = json.loads(r.read().decode())
+    bal = {"Zakat": 0, "Khair": 0, "Asanee": 0}
+    try: bal["Khair"]  = float(str(rows[4][10]).replace(",","").replace(" ",""))
+    except: pass
+    try: bal["Zakat"]  = float(str(rows[4][15]).replace(",","").replace(" ",""))
+    except: pass
+    try: bal["Asanee"] = float(str(rows[4][20]).replace(",","").replace(" ",""))
+    except: pass
+    return bal
+
+def get_rows():
+    url = SCRIPT_URL + "?t=" + str(int(time.time()))
+    with urllib.request.urlopen(url, timeout=15) as r:
+        return json.loads(r.read().decode())
 
 def append_entry(date, amount, category, details):
-    sheet = get_sheet()
-    sheet.append_row([date, amount, category, details])
+    data = json.dumps([date, amount, "", category, details]).encode()
+    req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
+    req.add_header("Content-Type", "text/plain")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())
 
-# ── Claude API ─────────────────────────────────────────────────────
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-def extract_entry(text: str, audio_b64: str = None, image_b64: str = None, recent_entries: str = "") -> dict:
+def fmt(n):
+    try: return f"{float(str(n).replace(',','')):,.0f}"
+    except: return str(n)
+
+def format_balances(bal):
+    return "\n".join([f"  {c}: {fmt(bal.get(c,0))} PKR" for c in CATEGORIES])
+
+def format_pending(entries):
+    msg = ""
+    for i, e in enumerate(entries):
+        msg += f"*{i+1}.* {e['date']} | {e['category']} | {fmt(e['amount'])} PKR | {e['details']}\n"
+    return msg
+
+def extract(text, img_b64=None, recent=""):
     content = []
-    
-    if image_b64:
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}
-        })
-    if audio_b64:
-        content.append({
-            "type": "document", 
-            "source": {"type": "base64", "media_type": "audio/ogg", "data": audio_b64}
-        })
-    
-    content.append({"type": "text", "text": text or "See attached media."})
-    
-    system = f"""You extract charity payment entries for Majid's tracker.
-Categories: Zakat, Khair, Aasanee.
-
-Return ONLY raw JSON (no markdown, no backticks):
-{{"date":"Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja"}}
-
-If unclear: {{"error":"reason"}}
-
+    if img_b64:
+        content.append({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":img_b64}})
+    content.append({"type":"text","text": text or "See attached."})
+    system = f"""Extract ALL charity payment entries from the input. Categories: Zakat, Khair, Asanee.
+Return ONLY a JSON array:
+[{{"date":"Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja"}}]
+If nothing found: [{{"error":"reason"}}]
 Rules:
-- Amount is always in PKR
-- Date format: Mon-YY (e.g. Apr-26)
-- If no date mentioned, use current month/year
-- Details should be concise description
-- Understand Urdu/English mix
+- Amount in PKR. 1m=1000000, 1 lakh=100000, 1k=1000
+- Date format Mon-YY e.g. Apr-26. If no date use current month/year Apr-26
+- Category MUST be exactly "Zakat", "Khair", or "Asanee" - fix spelling mistakes. Use "Asanee" not "Aasanee"
+- Details: concise description
+Recent entries:
+{recent}"""
+    r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1000, system=system, messages=[{"role":"user","content":content}])
+    raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
+    result = json.loads(raw)
+    if isinstance(result, dict): result = [result]
+    return result
 
-Recent entries for duplicate check:
-{recent_entries}"""
+def search_entries(rows, keyword=None, category=None, month=None, limit=None):
+    results = []
+    for row in rows[1:]:
+        if len(row) < 4: continue
+        date    = str(row[0]).strip()
+        amount  = str(row[1]).strip()
+        cat     = str(row[3]).strip() if len(row) > 3 else ""
+        details = str(row[4]).strip() if len(row) > 4 else ""
+        if cat not in CATEGORIES and cat not in ["Aasanee"]: continue
+        if cat == "Aasanee": cat = "Asanee"
+        if category and cat.lower() != category.lower(): continue
+        if keyword and keyword.lower() not in details.lower() and keyword.lower() not in date.lower(): continue
+        if month and month.lower() not in date.lower(): continue
+        try: amt = float(str(amount).replace(",",""))
+        except: amt = 0
+        results.append({"date":date,"amount":amt,"category":cat,"details":details})
+    if limit: results = results[-limit:]
+    return list(reversed(results))
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        system=system,
-        messages=[{"role": "user", "content": content}]
-    )
-    
-    raw = response.content[0].text.strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    return json.loads(raw)
+def format_entries(entries, title):
+    if not entries: return f"*{title}*\n\nNo entries found."
+    total = sum(e["amount"] for e in entries)
+    msg = f"*{title}*\n_{len(entries)} entries | Total: {fmt(total)} PKR_\n\n"
+    for e in entries:
+        msg += f"- {e['date']} | {fmt(e['amount'])} PKR | {e['category']} | {e['details']}\n"
+    return msg
 
-def transcribe_audio(audio_b64: str) -> str:
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        system="Transcribe this voice message exactly as spoken. Return only the transcription, nothing else.",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "document", "source": {"type": "base64", "media_type": "audio/ogg", "data": audio_b64}},
-                {"type": "text", "text": "Transcribe this audio message."}
-            ]
-        }]
-    )
-    return response.content[0].text.strip()
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        bal = get_balances()
+        msg = f"Majid Charity Tracker\n\nBalances:\n{format_balances(bal)}\n\n"
+        msg += "Send text, voice or screenshot!\n\n"
+        msg += "Search commands:\n"
+        msg += "- last 10 zakat\n- last 5 khair\n- search madiha\n- show december entries\n- /balances"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"Bot running! Sheet error: {e}")
 
-# ── Helpers ────────────────────────────────────────────────────────
-def fmt(n: float) -> str:
-    if n >= 10_000_000:
-        return f"{n/10_000_000:.2f}Cr"
-    if n >= 100_000:
-        return f"{n/100_000:.2f}L"
-    return f"{n:,.0f}"
+async def balances_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
+    try:
+        bal = get_balances()
+        await update.message.reply_text(f"Current Balances:\n\n{format_balances(bal)}")
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
 
-def format_balances(balances: dict) -> str:
-    lines = []
-    for cat in CATEGORIES:
-        amt = balances.get(cat, 0)
-        lines.append(f"  {cat}: {fmt(amt)} PKR")
-    return "\n".join(lines)
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
+    text = update.message.text.strip()
+    tl = text.lower()
+    pending = ctx.user_data.get("pending", [])
 
-def format_confirmation_card(entry: dict, balances: dict) -> str:
-    return f"""📋 *I understood this as:*
+    # Handle entry corrections when there are pending entries
+    if pending and isinstance(pending, list):
+        # Category correction: "entry 2 is zakat" or "2 khair" or "entry 2 zakat"
+        m = re.search(r'(?:entry\s*)?(\d+)\s*(?:is\s+|category\s+)?(\w+)', tl)
+        if m:
+            idx = int(m.group(1)) - 1
+            raw_cat = m.group(2).strip().lower()
+            new_cat = CAT_MAP.get(raw_cat)
+            if 0 <= idx < len(pending) and new_cat:
+                pending[idx]["category"] = new_cat
+                ctx.user_data["pending"] = pending
+                msg = "Updated! Here are your entries:\n\n"
+                msg += format_pending(pending)
+                msg += "\nReply YES to confirm all or make more corrections."
+                await update.message.reply_text(msg)
+                return
 
-📅 Date: `{entry['date']}`
-🏷 Category: `{entry['category']}`
-💰 Amount: `{int(entry['amount']):,} PKR`
-📝 Details: `{entry['details']}`
+        # Amount correction: "entry 2 amount 500000" or "entry 2 amount 5m"
+        m2 = re.search(r'(?:entry\s*)?(\d+)\s+amount\s+(\d+\.?\d*)\s*(m|k|l)?', tl)
+        if m2:
+            idx = int(m2.group(1)) - 1
+            amt = float(m2.group(2))
+            suffix = m2.group(3) or ""
+            if suffix == "m": amt *= 1000000
+            elif suffix == "k": amt *= 1000
+            elif suffix == "l": amt *= 100000
+            if 0 <= idx < len(pending):
+                pending[idx]["amount"] = amt
+                ctx.user_data["pending"] = pending
+                msg = "Updated! Here are your entries:\n\n"
+                msg += format_pending(pending)
+                msg += "\nReply YES to confirm all or make more corrections."
+                await update.message.reply_text(msg)
+                return
 
-*Current {entry['category']} balance:* `{fmt(balances[entry['category']])} PKR`
+        # Date correction: "entry 2 date jan-26"
+        m3 = re.search(r'(?:entry\s*)?(\d+)\s+date\s+([a-z]{3}-\d{2})', tl)
+        if m3:
+            idx = int(m3.group(1)) - 1
+            new_date = m3.group(2).capitalize()
+            if 0 <= idx < len(pending):
+                pending[idx]["date"] = new_date
+                ctx.user_data["pending"] = pending
+                msg = "Updated! Here are your entries:\n\n"
+                msg += format_pending(pending)
+                msg += "\nReply YES to confirm all or make more corrections."
+                await update.message.reply_text(msg)
+                return
 
-Reply *YES* to confirm or tell me what to correct."""
-
-def format_saved_message(entry: dict, old_balances: dict, new_balances: dict) -> str:
-    cat = entry['category']
-    return f"""✅ *Saved to Google Sheets!*
-
-{cat}: `{fmt(old_balances[cat])}` → *{fmt(new_balances[cat])} PKR*
-
-*All balances:*
-{format_balances(new_balances)}"""
-
-# ── Bot Handlers ───────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    balances = get_balances()
-    await update.message.reply_text(
-        f"🕌 *Majid's Charity Tracker*\n\n"
-        f"Send me any text, voice note, or screenshot and I'll update your sheets.\n\n"
-        f"*Current balances:*\n{format_balances(balances)}",
-        parse_mode="Markdown"
-    )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Security check
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-
-    user_id = update.effective_user.id
-    text = update.message.text or ""
-
-    # Check if confirming a pending entry
-    if text.upper().strip() in ["YES", "Y", "CONFIRM", "OK", "ہاں", "HAN"]:
-        pending = context.user_data.get("pending_entry")
+    # YES confirm
+    if tl in ["yes","y","confirm","ok"]:
         if pending:
             try:
-                old_balances = get_balances()
-                append_entry(pending["date"], pending["amount"], pending["category"], pending["details"])
-                new_balances = get_balances()
-                context.user_data["pending_entry"] = None
-                await update.message.reply_text(
-                    format_saved_message(pending, old_balances, new_balances),
-                    parse_mode="Markdown"
-                )
+                old = get_balances()
+                for entry in pending:
+                    append_entry(entry["date"], entry["amount"], entry["category"], entry["details"])
+                new = get_balances()
+                ctx.user_data["pending"] = []
+                count = len(pending)
+                msg = f"{count} entr{'y' if count==1 else 'ies'} saved!\n\nNew balances:\n{format_balances(new)}"
+                await update.message.reply_text(msg)
             except Exception as e:
-                await update.message.reply_text(f"❌ Error saving: {str(e)}")
+                await update.message.reply_text(f"Error saving: {e}")
         else:
-            await update.message.reply_text("No pending entry to confirm. Send me some data first.")
+            await update.message.reply_text("No pending entry.")
         return
 
-    # Check if cancelling
-    if text.upper().strip() in ["NO", "CANCEL", "نہیں"]:
-        context.user_data["pending_entry"] = None
-        await update.message.reply_text("❌ Cancelled. Send me new data whenever you're ready.")
+    # NO cancel
+    if tl in ["no","cancel"]:
+        ctx.user_data["pending"] = []
+        await update.message.reply_text("Cancelled.")
         return
 
-    # Get recent entries for duplicate check
-    try:
-        sheet = get_sheet()
-        rows = sheet.get_all_values()
-        recent = []
-        for row in rows[-10:]:
-            if len(row) >= 4:
-                recent.append(f"{row[0]}|{row[1]}|{row[2]}|{row[3]}")
-        recent_str = "\n".join(recent)
-    except:
-        recent_str = ""
+    # Reporting queries
+    months = {"january":"jan","february":"feb","march":"mar","april":"apr","may":"may",
+              "june":"jun","july":"jul","august":"aug","september":"sep","october":"oct",
+              "november":"nov","december":"dec","jan":"jan","feb":"feb","mar":"mar",
+              "apr":"apr","jun":"jun","jul":"jul","aug":"aug","sep":"sep","oct":"oct",
+              "nov":"nov","dec":"dec"}
 
-    # Extract entry from text
-    await update.message.reply_text("🔍 Analyzing...")
-    
     try:
-        entry = extract_entry(text, recent_entries=recent_str)
-        
-        if "error" in entry:
-            await update.message.reply_text(f"❓ {entry['error']}\n\nPlease try again with more details.")
-            return
-        
-        # Store pending entry
-        context.user_data["pending_entry"] = entry
-        
-        # Get balances and show confirmation
-        balances = get_balances()
-        
-        # Duplicate check
-        dup_warning = ""
-        for row in rows[1:]:
-            if len(row) >= 4:
-                try:
-                    if (float(str(row[1]).replace(",","")) == entry["amount"] and 
-                        row[2] == entry["category"] and 
-                        row[3].lower() == entry["details"].lower()):
-                        dup_warning = "\n⚠️ *Possible duplicate detected!*\n"
-                        break
-                except:
-                    pass
-        
-        msg = format_confirmation_card(entry, balances)
-        if dup_warning:
-            msg += dup_warning
-            
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        
-    except json.JSONDecodeError:
-        await update.message.reply_text("❓ Couldn't extract a clear entry. Please try again.")
+        rows = get_rows()
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Security check
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text(f"Could not load sheet: {e}")
         return
 
-    await update.message.reply_text("🎙 Transcribing your voice note...")
-    
+    # Last N entries by category
+    if "last" in tl:
+        n = 10
+        for word in tl.split():
+            if word.isdigit(): n = int(word)
+        for cat in CATEGORIES:
+            if cat.lower() in tl:
+                entries = search_entries(rows, category=cat, limit=n)
+                await update.message.reply_text(format_entries(entries, f"Last {n} {cat} Entries"))
+                return
+
+    # Month search
+    search_starters = ["show","find","search","last","get","list","share","entries for","entries in"]
+    is_search = any(tl.startswith(s) for s in search_starters) or "entries" in tl
+    if is_search:
+        for month_name, month_code in months.items():
+            if month_name in tl:
+                entries = search_entries(rows, month=month_code)
+                await update.message.reply_text(format_entries(entries, f"{month_name.capitalize()} Entries"))
+                return
+
+    # Keyword search
+    for cmd in ["search","find","entries with","entries for"]:
+        if cmd in tl:
+            keyword = tl
+            for c in ["search","find","entries with","entries for","entries","zakat","khair","asanee"]:
+                keyword = keyword.replace(c,"").strip()
+            if keyword and len(keyword) > 2:
+                entries = search_entries(rows, keyword=keyword)
+                await update.message.reply_text(format_entries(entries, f"Entries matching '{keyword}'"))
+                return
+
+    # New entry extraction
+    await update.message.reply_text("Analyzing...")
     try:
-        # Download voice file
-        voice = update.message.voice
-        file = await context.bot.get_file(voice.file_id)
-        
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
+    except: recent = ""
+    try:
+        entries = extract(text, recent=recent)
+        if not entries or "error" in entries[0]:
+            err = entries[0].get("error","unknown") if entries else "unknown"
+            await update.message.reply_text(f"Could not extract: {err}\n\nTry again.")
+            return
+        ctx.user_data["pending"] = entries
+        bal = get_balances()
+        msg = f"I found {len(entries)} entr{'y' if len(entries)==1 else 'ies'}:\n\n"
+        msg += format_pending(entries)
+        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\n"
+        msg += "Reply YES to confirm all, or correct entries:\n"
+        msg += "- 'entry 2 is Zakat'\n- 'entry 1 amount 500000'\n- 'entry 3 date Mar-26'"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
+    await update.message.reply_text("Reading screenshot...")
+    try:
+        file = await ctx.bot.get_file(update.message.photo[-1].file_id)
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
             await file.download_to_drive(tmp.name)
-            with open(tmp.name, "rb") as f:
-                audio_data = f.read()
-        
-        import base64
-        audio_b64 = base64.b64encode(audio_data).decode()
-        
-        # Transcribe
-        transcript = transcribe_audio(audio_b64)
-        await update.message.reply_text(f"🎙 *Heard:* _{transcript}_", parse_mode="Markdown")
-        
-        # Now extract from transcript
+            with open(tmp.name,"rb") as f: img_b64 = base64.b64encode(f.read()).decode()
         try:
-            sheet = get_sheet()
-            rows = sheet.get_all_values()
-            recent = []
-            for row in rows[-10:]:
-                if len(row) >= 4:
-                    recent.append(f"{row[0]}|{row[1]}|{row[2]}|{row[3]}")
-            recent_str = "\n".join(recent)
-        except:
-            recent_str = ""
-        
-        entry = extract_entry(transcript, recent_entries=recent_str)
-        
-        if "error" in entry:
-            await update.message.reply_text(f"❓ {entry['error']}\n\nPlease try again.")
+            rows = get_rows()
+            recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
+        except: recent = ""
+        entries = extract(update.message.caption or "", img_b64=img_b64, recent=recent)
+        if not entries or "error" in entries[0]:
+            await update.message.reply_text("Could not extract entries. Add a caption describing the payment.")
             return
-        
-        context.user_data["pending_entry"] = entry
-        balances = get_balances()
-        
-        await update.message.reply_text(
-            format_confirmation_card(entry, balances),
-            parse_mode="Markdown"
-        )
-        
+        ctx.user_data["pending"] = entries
+        bal = get_balances()
+        msg = f"I found {len(entries)} entr{'y' if len(entries)==1 else 'ies'}:\n\n"
+        msg += format_pending(entries)
+        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\n"
+        msg += "Reply YES to confirm all, or correct entries:\n"
+        msg += "- 'entry 2 is Zakat'\n- 'entry 1 amount 500000'\n- 'entry 3 date Mar-26'"
+        await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"❌ Voice processing error: {str(e)}")
+        await update.message.reply_text(f"Photo error: {e}")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Security check
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        return
-
-    await update.message.reply_text("📸 Reading your screenshot...")
-    
-    try:
-        photo = update.message.photo[-1]  # highest resolution
-        file = await context.bot.get_file(photo.file_id)
-        
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            await file.download_to_drive(tmp.name)
-            with open(tmp.name, "rb") as f:
-                image_data = f.read()
-        
-        import base64
-        image_b64 = base64.b64encode(image_data).decode()
-        
-        caption = update.message.caption or ""
-        
-        try:
-            sheet = get_sheet()
-            rows = sheet.get_all_values()
-            recent = []
-            for row in rows[-10:]:
-                if len(row) >= 4:
-                    recent.append(f"{row[0]}|{row[1]}|{row[2]}|{row[3]}")
-            recent_str = "\n".join(recent)
-        except:
-            recent_str = ""
-        
-        entry = extract_entry(caption, image_b64=image_b64, recent_entries=recent_str)
-        
-        if "error" in entry:
-            await update.message.reply_text(f"❓ {entry['error']}\n\nPlease try again.")
-            return
-        
-        context.user_data["pending_entry"] = entry
-        balances = get_balances()
-        
-        await update.message.reply_text(
-            format_confirmation_card(entry, balances),
-            parse_mode="Markdown"
-        )
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Photo processing error: {str(e)}")
-
-async def balances_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        return
-    balances = get_balances()
-    await update.message.reply_text(
-        f"💰 *Current Balances:*\n\n{format_balances(balances)}",
-        parse_mode="Markdown"
-    )
-
-# ── Main ───────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("balances", balances_command))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(CommandHandler("balances", balances_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Bot started...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
