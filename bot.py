@@ -190,6 +190,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-Go to GitHub → bot.py → pencil → select all → delete → paste this → commit. Then Render will auto-deploy.​​​​​​​​​​​​​​​​
