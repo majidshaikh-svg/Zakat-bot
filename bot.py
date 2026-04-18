@@ -1,5 +1,3 @@
-Here is the complete clean code. Copy everything:
-
 import os, json, logging, tempfile, base64, urllib.request, time
 import anthropic
 from telegram import Update
