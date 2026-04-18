@@ -1,7 +1,9 @@
-import os, json, logging, tempfile, base64, urllib.request, time, re
+Here is the complete clean code. Copy everything:
+
+import os, json, logging, tempfile, base64, urllib.request, time
 import anthropic
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,23 +72,23 @@ Recent entries:
 def format_pending(entries):
     msg = ""
     for i, e in enumerate(entries):
-        msg += f"*{i+1}.* {e['date']} | {e['category']} | {fmt(e['amount'])} PKR | {e['details']}\n"
+        msg += f"{i+1}. {e['date']} | {e['category']} | {fmt(e['amount'])} PKR | {e['details']}\n"
     return msg
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         bal = get_balances()
-        await update.message.reply_text(f"🕌 Majid Charity Tracker\n\nBalances:\n{format_balances(bal)}\n\nSend text, voice or screenshot!", parse_mode="Markdown")
+        await update.message.reply_text(f"Majid Charity Tracker\n\nBalances:\n{format_balances(bal)}\n\nSend text, voice or screenshot!")
     except Exception as e:
-        await update.message.reply_text(f"✅ Bot running! Sheet error: {e}")
+        await update.message.reply_text(f"Bot running! Sheet error: {e}")
 
 async def balances_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
     try:
         bal = get_balances()
-        await update.message.reply_text(f"💰 Balances:\n\n{format_balances(bal)}")
+        await update.message.reply_text(f"Balances:\n\n{format_balances(bal)}")
     except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+        await update.message.reply_text(f"Error: {e}")
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
@@ -97,25 +99,23 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if tl in ["yes","y","confirm","ok"]:
         if pending:
             try:
-                old = get_balances()
                 for entry in pending:
                     append_entry(entry["date"], entry["amount"], entry["category"], entry["details"])
                 new = get_balances()
                 ctx.user_data["pending"] = []
-                count = len(pending)
-                await update.message.reply_text(f"✅ {count} entr{'y' if count==1 else 'ies'} saved!\n\nNew balances:\n{format_balances(new)}")
+                await update.message.reply_text(f"Saved!\n\nNew balances:\n{format_balances(new)}")
             except Exception as e:
-                await update.message.reply_text(f"❌ Error: {e}")
+                await update.message.reply_text(f"Error saving: {e}")
         else:
             await update.message.reply_text("No pending entry.")
         return
 
     if tl in ["no","cancel"]:
         ctx.user_data["pending"] = []
-        await update.message.reply_text("❌ Cancelled.")
+        await update.message.reply_text("Cancelled.")
         return
 
-    await update.message.reply_text("🔍 Analyzing...")
+    await update.message.reply_text("Analyzing...")
     try:
         rows = get_rows()
         recent = "\n".join([f"{r[0]}|{r[1]}|{r[2]}|{r[3]}" for r in rows[-10:] if len(r)>=4])
@@ -124,20 +124,20 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         entries = extract(text, recent=recent)
         if not entries or "error" in entries[0]:
             err = entries[0].get("error","unknown") if entries else "unknown"
-            await update.message.reply_text(f"❓ {err}\n\nTry again.")
+            await update.message.reply_text(f"Could not extract: {err}\n\nTry again.")
             return
         ctx.user_data["pending"] = entries
         bal = get_balances()
-        msg = f"📋 I found {len(entries)} entr{'y' if len(entries)==1 else 'ies'}:\n\n"
+        msg = f"I found {len(entries)} entries:\n\n"
         msg += format_pending(entries)
-        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\nReply *YES* to confirm."
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\nReply YES to confirm."
+        await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"Error: {e}")
 
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
-    await update.message.reply_text("🎙 Transcribing...")
+    await update.message.reply_text("Transcribing...")
     try:
         file = await ctx.bot.get_file(update.message.voice.file_id)
         with tempfile.NamedTemporaryFile(suffix=".ogg") as tmp:
@@ -147,15 +147,15 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             system="Transcribe exactly. Return only transcription.",
             messages=[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"audio/ogg","data":audio_b64}},{"type":"text","text":"Transcribe."}]}])
         transcript = r.content[0].text.strip()
-        await update.message.reply_text(f"🎙 Heard: _{transcript}_", parse_mode="Markdown")
+        await update.message.reply_text(f"Heard: {transcript}")
         update.message.text = transcript
         await handle_text(update, ctx)
     except Exception as e:
-        await update.message.reply_text(f"❌ Voice error: {e}")
+        await update.message.reply_text(f"Voice error: {e}")
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
-    await update.message.reply_text("📸 Reading...")
+    await update.message.reply_text("Reading screenshot...")
     try:
         file = await ctx.bot.get_file(update.message.photo[-1].file_id)
         with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
@@ -167,26 +167,26 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except: recent = ""
         entries = extract(update.message.caption or "", img_b64=img_b64, recent=recent)
         if not entries or "error" in entries[0]:
-            await update.message.reply_text("❓ Could not extract. Add a caption.")
+            await update.message.reply_text("Could not extract. Add a caption.")
             return
         ctx.user_data["pending"] = entries
         bal = get_balances()
-        msg = f"📋 I found {len(entries)} entr{'y' if len(entries)==1 else 'ies'}:\n\n"
+        msg = f"I found {len(entries)} entries:\n\n"
         msg += format_pending(entries)
-        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\nReply *YES* to confirm."
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\nReply YES to confirm."
+        await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"❌ Photo error: {e}")
+        await update.message.reply_text(f"Photo error: {e}")
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balances", balances_cmd))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Bot started...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
