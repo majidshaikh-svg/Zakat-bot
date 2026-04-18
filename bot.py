@@ -10,7 +10,7 @@ TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbzzE1itHnJ87R_ffxE5ZcRYth0Ds0_OOj46XGGjvW0gAi7CiE47L4ruTehZrefNY7uD/exec"
-CATEGORIES      = ["Zakat", "Khair", "Aasanee"]
+CATEGORIES      = ["Zakat", "Khair", "Asanee"]
 
 def get_balances():
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
@@ -30,7 +30,7 @@ def get_rows():
         return json.loads(r.read().decode())
 
 def append_entry(date, amount, category, details):
-    data = json.dumps([date, amount, category, details]).encode()
+    data = json.dumps([date, "", amount, category, details]).encode()
     req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
     req.add_header("Content-Type", "text/plain")
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -51,7 +51,7 @@ def extract(text, img_b64=None, recent=""):
     if img_b64:
         content.append({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":img_b64}})
     content.append({"type":"text","text": text or "See attached."})
-    system = f"""Extract ALL charity payment entries. Categories: Zakat, Khair, Aasanee.
+    system = f"""Extract ALL charity payment entries. Categories: Zakat, Khair, Asanee.
 Return ONLY a JSON array:
 [{{"date":"Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja"}}]
 If nothing found: [{{"error":"reason"}}]
@@ -188,3 +188,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+- Category MUST be exactly "Zakat", "Khair", or "Asanee"
