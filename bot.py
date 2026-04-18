@@ -30,7 +30,7 @@ def get_rows():
         return json.loads(r.read().decode())
 
 def append_entry(date, amount, category, details):
-    data = json.dumps([date, "", amount, category, details]).encode()
+    data = json.dumps(["", amount, "", category, details]).encode()
     req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
     req.add_header("Content-Type", "text/plain")
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -39,9 +39,7 @@ def append_entry(date, amount, category, details):
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 def fmt(n):
-    if n >= 10000000: return f"{n/10000000:.2f}Cr"
-    if n >= 100000: return f"{n/100000:.2f}L"
-    return f"{n:,.0f}"
+    return f"{int(n):,}"
 
 def format_balances(bal):
     return "\n".join([f"  {c}: {fmt(bal.get(c,0))} PKR" for c in CATEGORIES])
