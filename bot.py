@@ -179,7 +179,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Photo error: {e}")
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).updater(None).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balances", balances_cmd))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
