@@ -16,12 +16,13 @@ def get_balances():
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
     with urllib.request.urlopen(url, timeout=15) as r:
         rows = json.loads(r.read().decode())
-    bal = {c: 0 for c in CATEGORIES}
-    for row in rows[1:]:
-        cat = row[2] if len(row) > 2 and row[2] in CATEGORIES else (row[3] if len(row) > 3 and row[3] in CATEGORIES else None)
-        if cat:
-            try: bal[cat] += float(str(row[1]).replace(",",""))
-            except: pass
+    bal = {"Zakat": 0, "Khair": 0, "Asanee": 0}
+    try: bal["Khair"]  = float(str(rows[4][10]).replace(",","").replace(" ",""))
+    except: pass
+    try: bal["Zakat"]  = float(str(rows[4][15]).replace(",","").replace(" ",""))
+    except: pass
+    try: bal["Asanee"] = float(str(rows[4][20]).replace(",","").replace(" ",""))
+    except: pass
     return bal
 
 def get_rows():
