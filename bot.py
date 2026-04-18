@@ -112,10 +112,50 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Cancelled.")
         return
 
+        # Search queries
+    if any(w in tl for w in ["last","show","share","find","search","entries","list"]):
+        try:
+            rows = get_rows()
+        except Exception as e:
+            await update.message.reply_text(f"Could not load sheet: {e}")
+            return
+        n = 10
+        for word in tl.split():
+            if word.isdigit(): n = int(word)
+        cat_filter = None
+        for cat in CATEGORIES:
+            if cat.lower() in tl:
+                cat_filter = cat
+                break
+        results = []
+        for row in rows[1:]:
+            if len(row) < 4: continue
+            date    = str(row[0]).strip()
+            amount  = str(row[1]).strip()
+            cat     = str(row[3]).strip() if len(row) > 3 else ""
+            details = str(row[4]).strip() if len(row) > 4 else ""
+            if cat not in CATEGORIES: continue
+            if cat_filter and cat.lower() != cat_filter.lower(): continue
+            try: amt = float(str(amount).replace(",",""))
+            except: amt = 0
+            results.append({"date":date,"amount":amt,"category":cat,"details":details})
+        results = results[-n:]
+        results.reverse()
+        if not results:
+            await update.message.reply_text("No entries found.")
+            return
+        total = sum(e["amount"] for e in results)
+        msg = f"Last {len(results)} {cat_filter or ''} entries:\n\n"
+        for i, e in enumerate(results):
+            msg += f"{i+1}. {e['date']} | {e['category']} | {fmt(e['amount'])} PKR | {e['details']}\n"
+        msg += f"\nTotal: {fmt(total)} PKR"
+        await update.message.reply_text(msg)
+        return
+
     await update.message.reply_text("Analyzing...")
     try:
         rows = get_rows()
-        recent = "\n".join([f"{r[0]}|{r[1]}|{r[2]}|{r[3]}" for r in rows[-10:] if len(r)>=4])
+        recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
     except: recent = ""
     try:
         entries = extract(text, recent=recent)
@@ -123,11 +163,28 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             err = entries[0].get("error","unknown") if entries else "unknown"
             await update.message.reply_text(f"Could not extract: {err}\n\nTry again.")
             return
+        # Duplicate check
+        dup_found = []
+        try:
+            all_rows = rows
+            for row in all_rows[-30:]:
+                if len(row) < 5: continue
+                det = str(row[4]).strip()
+                for entry in entries:
+                    if det and entry.get("details") and (
+                        det.lower() in entry["details"].lower() or
+                        entry["details"].lower() in det.lower()
+                    ):
+                        dup_found.append(f"- {row[0]} | {row[1]} | {row[3]} | {det}")
+        except: pass
         ctx.user_data["pending"] = entries
         bal = get_balances()
         msg = f"I found {len(entries)} entries:\n\n"
         msg += format_pending(entries)
-        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\nReply YES to confirm."
+        msg += f"\nCurrent balances:\n{format_balances(bal)}\n\n"
+        if dup_found:
+            msg += f"⚠️ Possible duplicates:\n" + "\n".join(dup_found[:3]) + "\n\n"
+        msg += "Reply YES to confirm or NO to cancel."
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
