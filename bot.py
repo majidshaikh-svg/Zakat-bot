@@ -124,10 +124,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"Could not load sheet: {e}")
             return
+      
         n = 10
         for word in tl.split():
             if word.isdigit(): n = int(word)        
-                cat_filter = None
+            cat_filter = None
         for cat in CATEGORIES:
             if cat.lower() in tl:
                 cat_filter = cat
