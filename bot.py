@@ -1,544 +1,487 @@
 import os, json, logging, tempfile, base64, urllib.request, time, re
 import anthropic
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, Context
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(**name**)
-
-TELEGRAM_TOKEN  = os.environ[“TELEGRAM_TOKEN”]
-CLAUDE_API_KEY  = os.environ[“CLAUDE_API_KEY”]
-ALLOWED_USER_ID = int(os.environ.get(“ALLOWED_USER_ID”, “0”))
-SCRIPT_URL      = “https://script.google.com/macros/s/AKfycbzzE1itHnJ87R_ffxE5ZcRYth0Ds0_OOj46XGGjvW0gAi7CiE47L4ruTehZrefNY7uD/exec”
-CATEGORIES      = [“Zakat”, “Khair”, “Asanee”]
-
+logger = logging.getLogger(__name__)
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+CLAUDE_API_KEY = os.environ["CLAUDE_API_KEY"]
+ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
+SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzzE1itHnJ87R_ffxE5ZcRYth0Ds0_OOj4
+CATEGORIES = ["Zakat", "Khair", "Asanee"]
 CAT_ICON = {
-“Zakat”:  “🕌”,
-“Khair”:  “🤲”,
-“Asanee”: “👨‍👩‍👧”,
+"Zakat": " ",
+"Khair": " ",
+"Asanee": " ",
 }
-
-DIVIDER = “━━━━━━━━━━━━━━━━━━━━”
-
+DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 CONFIRM_PROMPT = (
-f”\nReply:\n”
-f”  ✅ YES to confirm\n”
-f”  ✏️ EDIT to correct\n”
-f”  ❌ NO to cancel”
+f"\nReply:\n"
+f" YES to confirm\n"
+f" EDIT to correct\n"
+f" NO to cancel"
 )
-
 EDIT_HELP = (
-f”✏️ What to fix? Tell me e.g.:\n”
-f”  • "1 is not a transaction"\n”
-f”  • "remove 2"\n”
-f”  • "3 is 50000"\n”
-f”  • "date is 23 Apr 2026"\n”
-f”  • "1 date is 23 Apr 2026"\n”
-f”  • "details are Bhabhi Naseem through Rafay"\n”
-f”  • "1 details are Bhabhi Naseem"”
+f" What to fix? Tell me e.g.:\n"
+f" • \"1 is not a transaction\"\n"
+f" • \"remove 2\"\n"
+f" • \"3 is 50000\"\n"
+f" • \"date is 23 Apr 2026\"\n"
+f" • \"1 date is 23 Apr 2026\"\n"
+f" • \"details are Bhabhi Naseem through Rafay\"\n"
+f" • \"1 details are Bhabhi Naseem\""
 )
-
 def get_balances():
-url = SCRIPT_URL + “?t=” + str(int(time.time()))
+url = SCRIPT_URL + "?t=" + str(int(time.time()))
 with urllib.request.urlopen(url, timeout=15) as r:
 rows = json.loads(r.read().decode())
-bal = {“Zakat”: 0, “Khair”: 0, “Asanee”: 0}
-try: bal[“Khair”]  = float(str(rows[4][10]).replace(”,”,””).replace(” “,””))
+bal = {"Zakat": 0, "Khair": 0, "Asanee": 0}
+try: bal["Khair"] = float(str(rows[4][10]).replace(",","").replace(" ",""))
 except: pass
-try: bal[“Zakat”]  = float(str(rows[4][15]).replace(”,”,””).replace(” “,””))
+try: bal["Zakat"] = float(str(rows[4][15]).replace(",","").replace(" ",""))
 except: pass
-try: bal[“Asanee”] = float(str(rows[4][20]).replace(”,”,””).replace(” “,””))
+try: bal["Asanee"] = float(str(rows[4][20]).replace(",","").replace(" ",""))
 except: pass
 return bal
-
 def get_rows():
-url = SCRIPT_URL + “?t=” + str(int(time.time()))
+url = SCRIPT_URL + "?t=" + str(int(time.time()))
 with urllib.request.urlopen(url, timeout=15) as r:
 return json.loads(r.read().decode())
-
 def append_entry(date, amount, category, details):
-# FIX: date is now passed correctly (was hardcoded as “”)
-data = json.dumps([date, amount, “”, category, details]).encode()
-req = urllib.request.Request(SCRIPT_URL, data=data, method=“POST”)
-req.add_header(“Content-Type”, “text/plain”)
+# FIX: date is now passed correctly (was hardcoded as "")
+data = json.dumps([date, amount, "", category, details]).encode()
+req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
+req.add_header("Content-Type", "text/plain")
 with urllib.request.urlopen(req, timeout=15) as r:
 return json.loads(r.read().decode())
-
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-
 def fmt(n):
-return f”{int(n):,}”
-
+return f"{int(n):,}"
 def format_balances(bal):
 lines = []
 for c in CATEGORIES:
-icon = CAT_ICON.get(c, “💰”)
+icon = CAT_ICON.get(c, " ")
 val = bal.get(c, 0)
-lines.append(f”  {icon} {c}:   PKR {fmt(val)}”)
-return “\n”.join(lines)
-
+lines.append(f" {icon} {c}: PKR {fmt(val)}")
+return "\n".join(lines)
 def format_date_display(date_str):
-“”“Normalize date display - strip raw ISO timestamps.”””
+"""Normalize date display - strip raw ISO timestamps."""
 if not date_str:
-return “—”
-if “T” in date_str:
-date_str = date_str.split(“T”)[0]
+return "-"
+if "T" in date_str:
+date_str = date_str.split("T")[0]
 try:
-parts = date_str.split(”-”)
-months = [“Jan”,“Feb”,“Mar”,“Apr”,“May”,“Jun”,“Jul”,“Aug”,“Sep”,“Oct”,“Nov”,“Dec”]
+parts = date_str.split("-")
+months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
 d = int(parts[2])
 m = months[int(parts[1])-1]
 y = parts[0][2:]
-return f”{d:02d}-{m}-{y}”
+return f"{d:02d}-{m}-{y}"
 except:
 return date_str
 return date_str
-
 def clean_details(details, amount, category):
-“”“Remove amount/category repetition from details field.”””
+"""Remove amount/category repetition from details field."""
 if not details:
 return details
 cleaned = details
 patterns = [
-rf”(?i)^is\s+{re.escape(category)}\s+pkr\s+[\d,]+\s*”,
-rf”(?i)^is\s+[\d,]+\s*”,
-rf”(?i)pkr\s+{re.escape(str(int(amount)))}\s*”,
+rf"(?i)^is\s+{re.escape(category)}\s+pkr\s+[\d,]+\s*",
+rf"(?i)^is\s+[\d,]+\s*",
+rf"(?i)pkr\s+{re.escape(str(int(amount)))}\s*",
 ]
 for p in patterns:
-cleaned = re.sub(p, “”, cleaned).strip()
-cleaned = re.sub(r’\s*[=-]\s*[\d,]+\s*$’, ‘’, cleaned).strip()
-cleaned = cleaned.strip(” -=|,”)
+cleaned = re.sub(p, "", cleaned).strip()
+cleaned = re.sub(r'\s*[=\-]\s*[\d,]+\s*$', '', cleaned).strip()
+cleaned = cleaned.strip(" -=|,")
 return cleaned if cleaned else details
-
 def format_entry_list(results, cat_filter=None):
-total = sum(e[“amount”] for e in results)
-label = cat_filter or “All”
-msg = f”📋 Last {len(results)} {label} Entries\n{DIVIDER}\n”
+total = sum(e["amount"] for e in results)
+label = cat_filter or "All"
+msg = f" Last {len(results)} {label} Entries\n{DIVIDER}\n"
 for i, e in enumerate(results):
-icon = CAT_ICON.get(e[“category”], “💰”)
-date_str = format_date_display(e[“date”]) if e[“date”] else “—”
-details = clean_details(e.get(“details”,””), e.get(“amount”,0), e.get(“category”,””))
-msg += f”{i+1}. {icon} {e[‘category’]} | PKR {fmt(e[‘amount’])} | 📅 {date_str}\n”
+icon = CAT_ICON.get(e["category"], " ")
+date_str = format_date_display(e["date"]) if e["date"] else "-"
+details = clean_details(e.get("details",""), e.get("amount",0), e.get("category",""))
+msg += f"{i+1}. {icon} {e['category']} | PKR {fmt(e['amount'])} | {date_str}\n"
 if details:
-msg += f”   📝 {details}\n”
-msg += “\n”
-msg += f”{DIVIDER}\n💵 Total: PKR {fmt(total)}”
+msg += f" {details}\n"
+msg += "\n"
+msg += f"{DIVIDER}\n Total: PKR {fmt(total)}"
 return msg
-
 def format_pending(entries):
-msg = “”
+msg = ""
 for i, e in enumerate(entries):
-icon = CAT_ICON.get(e[“category”], “💰”)
-date_str = format_date_display(e[“date”]) if e[“date”] else “—”
-details = clean_details(e.get(“details”,””), e.get(“amount”,0), e.get(“category”,””))
-msg += f”{i+1}. {icon} {e[‘category’]} | PKR {fmt(e[‘amount’])} | 📅 {date_str}\n”
+icon = CAT_ICON.get(e["category"], " ")
+date_str = format_date_display(e["date"]) if e["date"] else "-"
+details = clean_details(e.get("details",""), e.get("amount",0), e.get("category",""))
+msg += f"{i+1}. {icon} {e['category']} | PKR {fmt(e['amount'])} | {date_str}\n"
 if details:
-msg += f”   📝 {details}\n”
-msg += “\n”
+msg += f" {details}\n"
+msg += "\n"
 return msg
-
 def check_duplicates(entries, rows):
-“”“Check last 20 rows for duplicates — skip rows with no date.”””
+"""Check last 20 rows for duplicates - skip rows with no date."""
 dup_found = []
 recent_rows = [r for r in rows[-20:] if len(r) >= 5 and str(r[0]).strip()]
 for row in recent_rows:
-row_cat  = str(row[3]).strip()
-row_det  = str(row[4]).strip()
+row_cat = str(row[3]).strip()
+row_det = str(row[4]).strip()
 row_date = str(row[0]).strip()
-try: row_amt = float(str(row[1]).replace(”,”,””))
+try: row_amt = float(str(row[1]).replace(",",""))
 except: continue
 for entry in entries:
-same_amount   = int(row_amt) == int(entry.get(“amount”, -1))
-same_category = row_cat.lower() == entry.get(“category”,””).lower()
-det = entry.get(“details”,””)
-similar_desc  = (
+same_amount = int(row_amt) == int(entry.get("amount", -1))
+same_category = row_cat.lower() == entry.get("category","").lower()
+det = entry.get("details","")
+similar_desc = (
 row_det and det and (
 row_det.lower() in det.lower() or
 det.lower() in row_det.lower()
 )
 )
 if same_amount and same_category and similar_desc:
-icon = CAT_ICON.get(row_cat, “💰”)
+icon = CAT_ICON.get(row_cat, " ")
 dup_found.append(
-f”  {icon} {row_cat} | PKR {fmt(int(row_amt))} | 📅 {format_date_display(row_date)}\n  📝 {row_det}”
+f" {icon} {row_cat} | PKR {fmt(int(row_amt))} | {format_date_display(
 )
 return dup_found
-
 def parse_date_string(date_text):
-“”“Try to parse a natural date string into DD-Mon-YY format.”””
+"""Try to parse a natural date string into DD-Mon-YY format."""
 date_text = date_text.strip()
 months_map = {
-“jan”:1,“feb”:2,“mar”:3,“apr”:4,“may”:5,“jun”:6,
-“jul”:7,“aug”:8,“sep”:9,“oct”:10,“nov”:11,“dec”:12,
-“january”:1,“february”:2,“march”:3,“april”:4,“june”:6,
-“july”:7,“august”:8,“september”:9,“october”:10,“november”:11,“december”:12,
+"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+"january":1,"february":2,"march":3,"april":4,"june":6,
+"july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
 }
-month_names = [“Jan”,“Feb”,“Mar”,“Apr”,“May”,“Jun”,“Jul”,“Aug”,“Sep”,“Oct”,“Nov”,“Dec”]
-
-```
+month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 # Already in DD-Mon-YY
 if re.match(r'\d{1,2}-[A-Za-z]{3}-\d{2}$', date_text):
-    return date_text
-
+return date_text
 # "23 April 2026" or "23 Apr 2026" or "April 2026" (no day → use 1st)
 m = re.search(r'(\d{1,2})?\s*([A-Za-z]+)\s*(\d{2,4})', date_text, re.I)
 if m:
-    day   = int(m.group(1)) if m.group(1) else 1
-    mon   = m.group(2).lower()
-    year  = m.group(3)
-    if len(year) == 4: year = year[2:]
-    if mon in months_map:
-        return f"{day:02d}-{month_names[months_map[mon]-1]}-{year}"
-
+day = int(m.group(1)) if m.group(1) else 1
+mon = m.group(2).lower()
+year = m.group(3)
+if len(year) == 4: year = year[2:]
+if mon in months_map:
+return f"{day:02d}-{month_names[months_map[mon]-1]}-{year}"
 return None
-```
-
 def apply_corrections(entries, text):
-“””
+"""
 Parse inline corrections:
-- “remove 1” / “delete 2” / “1 is not a transaction”
-- “3 is 50000”  → correct amount
-- “date is 23 Apr 2026”  → set date on ALL entries
-- “1 date is 23 Apr 2026” → set date on entry 1
-- “details are Bhabhi Naseem” → set details on ALL entries
-- “1 details are Bhabhi Naseem” → set details on entry 1
-“””
+- "remove 1" / "delete 2" / "1 is not a transaction"
+- "3 is 50000" → correct amount
+- "date is 23 Apr 2026" → set date on ALL entries
+- "1 date is 23 Apr 2026" → set date on entry 1
+- "details are Bhabhi Naseem" → set details on ALL entries
+- "1 details are Bhabhi Naseem" → set details on entry 1
+"""
 corrections = []
 to_remove = set()
 tl = text.lower().strip()
-entries = [dict(e) for e in entries]  # deep copy
-
-```
+entries = [dict(e) for e in entries] # deep copy
 # Remove / not a transaction
 for m in re.finditer(r'(?:remove|delete)\s+(\d+)', tl):
-    idx = int(m.group(1)) - 1
-    if 0 <= idx < len(entries):
-        to_remove.add(idx)
-        corrections.append(f"Removed entry {idx+1}")
-
+idx = int(m.group(1)) - 1
+if 0 <= idx < len(entries):
+to_remove.add(idx)
+corrections.append(f"Removed entry {idx+1}")
 for m in re.finditer(r'(\d+)\s+is\s+not\s+a\s+transaction', tl):
-    idx = int(m.group(1)) - 1
-    if 0 <= idx < len(entries):
-        to_remove.add(idx)
-        corrections.append(f"Removed entry {idx+1}")
-
+idx = int(m.group(1)) - 1
+if 0 <= idx < len(entries):
+to_remove.add(idx)
+corrections.append(f"Removed entry {idx+1}")
 # Amount correction: "3 is 50000"
 for m in re.finditer(r'(\d+)\s+is\s+([\d,]+)', text):
-    idx = int(m.group(1)) - 1
-    amt_str = m.group(2).replace(",","")
-    if amt_str.isdigit() and 0 <= idx < len(entries) and idx not in to_remove:
-        old = entries[idx]["amount"]
-        entries[idx]["amount"] = int(amt_str)
-        corrections.append(f"Entry {idx+1} amount: PKR {fmt(old)} → PKR {fmt(int(amt_str))}")
-
+idx = int(m.group(1)) - 1
+amt_str = m.group(2).replace(",","")
+if amt_str.isdigit() and 0 <= idx < len(entries) and idx not in to_remove:
+old = entries[idx]["amount"]
+entries[idx]["amount"] = int(amt_str)
+corrections.append(f"Entry {idx+1} amount: PKR {fmt(old)} → PKR {fmt(int(amt_str)
 # Date correction: "1 date is 23 Apr 2026" or "date is 23 Apr 2026"
 m = re.search(r'(\d+)\s+date\s+is\s+(.+)', tl)
 if m:
-    idx = int(m.group(1)) - 1
-    parsed = parse_date_string(m.group(2))
-    if parsed and 0 <= idx < len(entries) and idx not in to_remove:
-        entries[idx]["date"] = parsed
-        corrections.append(f"Entry {idx+1} date → {parsed}")
+idx = int(m.group(1)) - 1
+parsed = parse_date_string(m.group(2))
+if parsed and 0 <= idx < len(entries) and idx not in to_remove:
+entries[idx]["date"] = parsed
+corrections.append(f"Entry {idx+1} date → {parsed}")
 else:
-    m = re.search(r'date\s+is\s+(.+)', tl)
-    if m:
-        parsed = parse_date_string(m.group(1))
-        if parsed:
-            for i, e in enumerate(entries):
-                if i not in to_remove:
-                    entries[i]["date"] = parsed
-            corrections.append(f"Date set to {parsed} for all entries")
-
+m = re.search(r'date\s+is\s+(.+)', tl)
+if m:
+parsed = parse_date_string(m.group(1))
+if parsed:
+for i, e in enumerate(entries):
+if i not in to_remove:
+entries[i]["date"] = parsed
+corrections.append(f"Date set to {parsed} for all entries")
 # Details correction: "1 details are X" or "details are X"
 m = re.search(r'(\d+)\s+details?\s+(?:are|is)\s+(.+)', text, re.I)
 if m:
-    idx = int(m.group(1)) - 1
-    new_det = m.group(2).strip()
-    if 0 <= idx < len(entries) and idx not in to_remove:
-        entries[idx]["details"] = new_det
-        corrections.append(f"Entry {idx+1} details → {new_det}")
+idx = int(m.group(1)) - 1
+new_det = m.group(2).strip()
+if 0 <= idx < len(entries) and idx not in to_remove:
+entries[idx]["details"] = new_det
+corrections.append(f"Entry {idx+1} details → {new_det}")
 else:
-    m = re.search(r'details?\s+(?:are|is)\s+(.+)', text, re.I)
-    if m:
-        new_det = m.group(1).strip()
-        for i in range(len(entries)):
-            if i not in to_remove:
-                entries[i]["details"] = new_det
-        corrections.append(f"Details set to: {new_det}")
-
+m = re.search(r'details?\s+(?:are|is)\s+(.+)', text, re.I)
+if m:
+new_det = m.group(1).strip()
+for i in range(len(entries)):
+if i not in to_remove:
+entries[i]["details"] = new_det
+corrections.append(f"Details set to: {new_det}")
 updated = [e for i, e in enumerate(entries) if i not in to_remove]
 return updated, corrections
-```
-
-def extract(text, img_b64=None, recent=””):
+def extract(text, img_b64=None, recent=""):
 content = []
 if img_b64:
-content.append({“type”:“image”,“source”:{“type”:“base64”,“media_type”:“image/jpeg”,“data”:img_b64}})
-content.append({“type”:“text”,“text”: text or “See attached.”})
-today = time.strftime(”%d-%b-%y”)
-system = f””“Extract ALL charity payment entries. Categories: Zakat, Khair, Asanee.
+content.append({"type":"image","source":{"type":"base64","media_type":"image/jpeg","d
+content.append({"type":"text","text": text or "See attached."})
+today = time.strftime("%d-%b-%y")
+system = f"""Extract ALL charity payment entries. Categories: Zakat, Khair, Asanee.
 Return ONLY a JSON array:
-[{{“date”:“19-Apr-26”,“amount”:50000,“category”:“Zakat”,“details”:“Mama Raja”}}]
-If nothing found: [{{“error”:“reason”}}]
+[{{"date":"19-Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja"}}]
+If nothing found: [{{"error":"reason"}}]
 Rules:
-
+catego
 - Amount in PKR. 1m=1000000, 1 lakh=100000, 1k=1000
 - Date format DD-Mon-YY e.g. 19-Apr-26
-- IMPORTANT: If the user mentions a specific date or month, use that date. Only use today ({today}) if absolutely no date is mentioned.
+- IMPORTANT: If the user mentions a specific date or month, use that date. Only use today ({t
 - Fix spelling mistakes in category names
-- Details should be clean human-readable description only. Do NOT repeat the amount or category in details.
-  Recent entries:
-  {recent}”””
-  r = client.messages.create(model=“claude-sonnet-4-20250514”, max_tokens=1000, system=system, messages=[{“role”:“user”,“content”:content}])
-  raw = r.content[0].text.strip().replace(”`json","").replace("`”,””).strip()
-  result = json.loads(raw)
-  if isinstance(result, dict): result = [result]
-  for e in result:
-  if not e.get(“date”) or e.get(“date”) in [“unknown”, “”]:
-  e[“date”] = today
-  return result
-
+- Details should be clean human-readable description only. Do NOT repeat the amount or Recent entries:
+{recent}"""
+r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1000, system=syst
+raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
+result = json.loads(raw)
+if isinstance(result, dict): result = [result]
+for e in result:
+if not e.get("date") or e.get("date") in ["unknown", ""]:
+e["date"] = today
+return result
 def build_confirmation_msg(entries, bal, dup_found):
 msg = (
-f”✅ {len(entries)} entr{‘y’ if len(entries)==1 else ‘ies’} found:\n\n”
-f”{format_pending(entries)}”
-f”{DIVIDER}\n”
-f”💳 Current Balances:\n”
-f”{format_balances(bal)}\n”
-f”{DIVIDER}\n”
+f" {len(entries)} entr{'y' if len(entries)==1 else 'ies'} found:\n\n"
+f"{format_pending(entries)}"
+f"{DIVIDER}\n"
+f" Current Balances:\n"
+f"{format_balances(bal)}\n"
+f"{DIVIDER}\n"
 )
 if dup_found:
-msg += f”⚠️ Possible duplicate found:\n\n” + “\n\n”.join(dup_found[:3]) + f”\n\n{DIVIDER}\n”
-msg += CONFIRM_PROMPT
+msg += f" msg += CONFIRM_PROMPT
 return msg
-
+Possible duplicate found:\n\n" + "\n\n".join(dup_found[:3]) + f"\n\n{DIVI
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 try:
 bal = get_balances()
 msg = (
-f”🌙 Majid Charity Tracker\n”
-f”{DIVIDER}\n”
-f”💳 Balances:\n”
-f”{format_balances(bal)}\n”
-f”{DIVIDER}\n”
-f”📩 Send text, voice or screenshot!”
+f" Majid Charity Tracker\n"
+f"{DIVIDER}\n"
+f" Balances:\n"
+f"{format_balances(bal)}\n"
+f"{DIVIDER}\n"
+f" Send text, voice or screenshot!"
 )
 await update.message.reply_text(msg)
 except Exception as e:
-await update.message.reply_text(f”Bot running! Sheet error: {e}”)
-
+await update.message.reply_text(f"Bot running! Sheet error: {e}")
 async def balances_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
 try:
 bal = get_balances()
 msg = (
-f”💳 Balances\n”
-f”{DIVIDER}\n”
-f”{format_balances(bal)}”
+f" Balances\n"
+f"{DIVIDER}\n"
+f"{format_balances(bal)}"
 )
 await update.message.reply_text(msg)
 except Exception as e:
-await update.message.reply_text(f”Error: {e}”)
-
+await update.message.reply_text(f"Error: {e}")
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
 text = update.message.text.strip()
 tl = text.lower()
-pending = ctx.user_data.get(“pending”, [])
-waiting_edit = ctx.user_data.get(“waiting_edit”, False)
-
-```
+pending = ctx.user_data.get("pending", [])
+waiting_edit = ctx.user_data.get("waiting_edit", False)
 # --- YES ---
 if tl in ["yes","y","confirm","ok"]:
-    if pending:
-        try:
-            for entry in pending:
-                details = clean_details(entry.get("details",""), entry.get("amount",0), entry.get("category",""))
-                append_entry(entry["date"], entry["amount"], entry["category"], details)
-            new = get_balances()
-            ctx.user_data["pending"] = []
-            ctx.user_data["waiting_edit"] = False
-            msg = (
-                f"✅ Saved!\n"
-                f"{DIVIDER}\n"
-                f"💳 New Balances:\n"
-                f"{format_balances(new)}"
-            )
-            await update.message.reply_text(msg)
-        except Exception as e:
-            await update.message.reply_text(f"Error saving: {e}")
-    else:
-        await update.message.reply_text("No pending entry.")
-    return
-
+if pending:
+try:
+for entry in pending:
+details = clean_details(entry.get("details",""), entry.get("amount",0), e
+append_entry(entry["date"], entry["amount"], entry["category"], details)
+new = get_balances()
+ctx.user_data["pending"] = []
+ctx.user_data["waiting_edit"] = False
+msg = (
+f" Saved!\n"
+f"{DIVIDER}\n"
+f" New Balances:\n"
+f"{format_balances(new)}"
+)
+await update.message.reply_text(msg)
+except Exception as e:
+await update.message.reply_text(f"Error saving: {e}")
+else:
+return
+await update.message.reply_text("No pending entry.")
 # --- NO ---
 if tl in ["no","cancel"]:
-    ctx.user_data["pending"] = []
-    ctx.user_data["waiting_edit"] = False
-    await update.message.reply_text("❌ Cancelled.")
-    return
-
+ctx.user_data["pending"] = []
+ctx.user_data["waiting_edit"] = False
+await update.message.reply_text(" Cancelled.")
+return
 # --- EDIT ---
 if tl in ["edit","e"] and pending:
-    ctx.user_data["waiting_edit"] = True
-    await update.message.reply_text(EDIT_HELP)
-    return
-
+ctx.user_data["waiting_edit"] = True
+await update.message.reply_text(EDIT_HELP)
+return
 # --- Handle edit instructions ---
 if waiting_edit and pending:
-    updated, corrections = apply_corrections(list(pending), text)
-    ctx.user_data["waiting_edit"] = False
-    if corrections:
-        ctx.user_data["pending"] = updated
-        if not updated:
-            ctx.user_data["pending"] = []
-            await update.message.reply_text("✅ All entries removed. Nothing to save.")
-            return
-        try: bal = get_balances()
-        except: bal = {}
-        summary = "\n".join(f"  • {c}" for c in corrections)
-        msg = (
-            f"✏️ Updated:\n{summary}\n\n"
-            f"{format_pending(updated)}"
-            f"{DIVIDER}\n"
-            f"💳 Current Balances:\n"
-            f"{format_balances(bal)}\n"
-            f"{DIVIDER}\n"
-            f"{CONFIRM_PROMPT}"
-        )
-        await update.message.reply_text(msg)
-    else:
-        ctx.user_data["waiting_edit"] = True
-        await update.message.reply_text(f"Couldn't understand that correction.\n\n{EDIT_HELP}")
-    return
-
+updated, corrections = apply_corrections(list(pending), text)
+ctx.user_data["waiting_edit"] = False
+if corrections:
+ctx.user_data["pending"] = updated
+if not updated:
+ctx.user_data["pending"] = []
+await update.message.reply_text(" return
+try: bal = get_balances()
+except: bal = {}
+summary = "\n".join(f" • {c}" for c in corrections)
+msg = (
+f" Updated:\n{summary}\n\n"
+f"{format_pending(updated)}"
+f"{DIVIDER}\n"
+f" Current Balances:\n"
+f"{format_balances(bal)}\n"
+f"{DIVIDER}\n"
+f"{CONFIRM_PROMPT}"
+All entries removed. Nothing to save.")
+)
+else:
+return
+await update.message.reply_text(msg)
+ctx.user_data["waiting_edit"] = True
+await update.message.reply_text(f"Couldn't understand that correction.\n\n{EDIT_H
 # --- Search queries ---
 if any(w in tl for w in ["last","show","share","find","search","entries","list"]):
-    try:
-        rows = get_rows()
-    except Exception as e:
-        await update.message.reply_text(f"Could not load sheet: {e}")
-        return
-
-    n = 10
-    for word in tl.split():
-        if word.isdigit(): n = int(word)
-    cat_filter = None
-    for cat in CATEGORIES:
-        if cat.lower() in tl:
-            cat_filter = cat
-            break
-
-    keyword = None
-    m = re.search(r'mention(?:ing)?\s+(\w+)', tl)
-    if m: keyword = m.group(1)
-    else:
-        for trigger in ["with","about","for"]:
-            if trigger in tl.split():
-                parts = tl.split(trigger)
-                if len(parts) > 1 and parts[-1].strip():
-                    keyword = parts[-1].strip().split()[0]
-                break
-
-    results = []
-    for row in rows[1:]:
-        if len(row) < 4: continue
-        date    = str(row[0]).strip()
-        amount  = str(row[1]).strip()
-        cat     = str(row[3]).strip() if len(row) > 3 else ""
-        details = str(row[4]).strip() if len(row) > 4 else ""
-        if cat not in CATEGORIES: continue
-        if cat_filter and cat.lower() != cat_filter.lower(): continue
-        if keyword and keyword.lower() not in details.lower() and keyword.lower() not in date.lower(): continue
-        try: amt = float(str(amount).replace(",",""))
-        except: amt = 0
-        results.append({"date":date,"amount":amt,"category":cat,"details":details})
-    results = results[-n:]
-    results.reverse()
-    if not results:
-        await update.message.reply_text("No entries found.")
-        return
-    await update.message.reply_text(format_entry_list(results, cat_filter))
-    return
-
-# --- Extract new entry ---
-await update.message.reply_text("🔍 Analyzing...")
 try:
-    rows = get_rows()
-    recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
+rows = get_rows()
+except Exception as e:
+await update.message.reply_text(f"Could not load sheet: {e}")
+return
+n = 10
+for word in tl.split():
+if word.isdigit(): n = int(word)
+cat_filter = None
+for cat in CATEGORIES:
+if cat.lower() in tl:
+cat_filter = cat
+break
+keyword = None
+m = re.search(r'mention(?:ing)?\s+(\w+)', tl)
+if m: keyword = m.group(1)
+else:
+for trigger in ["with","about","for"]:
+if trigger in tl.split():
+parts = tl.split(trigger)
+if len(parts) > 1 and parts[-1].strip():
+keyword = parts[-1].strip().split()[0]
+break
+results = []
+for row in rows[1:]:
+if len(row) < 4: continue
+date = str(row[0]).strip()
+amount = str(row[1]).strip()
+cat = str(row[3]).strip() if len(row) > 3 else ""
+details = str(row[4]).strip() if len(row) > 4 else ""
+if cat not in CATEGORIES: continue
+if cat_filter and cat.lower() != cat_filter.lower(): continue
+if keyword and keyword.lower() not in details.lower() and keyword.lower() not in
+try: amt = float(str(amount).replace(",",""))
+except: amt = 0
+results.append({"date":date,"amount":amt,"category":cat,"details":details})
+results = results[-n:]
+results.reverse()
+if not results:
+await update.message.reply_text("No entries found.")
+return
+await update.message.reply_text(format_entry_list(results, cat_filter))
+return
+# --- Extract new entry ---
+await update.message.reply_text(" Analyzing...")
+try:
+rows = get_rows()
+recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
 except: recent = ""; rows = []
 try:
-    entries = extract(text, recent=recent)
-    if not entries or "error" in entries[0]:
-        err = entries[0].get("error","unknown") if entries else "unknown"
-        await update.message.reply_text(f"Could not extract: {err}\n\nTry again.")
-        return
-
-    dup_found = check_duplicates(entries, rows)
-    ctx.user_data["pending"] = entries
-    ctx.user_data["waiting_edit"] = False
-    try: bal = get_balances()
-    except: bal = {}
-    await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found))
+entries = extract(text, recent=recent)
+if not entries or "error" in entries[0]:
+err = entries[0].get("error","unknown") if entries else "unknown"
+await update.message.reply_text(f"Could not extract: {err}\n\nTry again.")
+return
+dup_found = check_duplicates(entries, rows)
+ctx.user_data["pending"] = entries
+ctx.user_data["waiting_edit"] = False
+try: bal = get_balances()
+except: bal = {}
+await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found))
 except Exception as e:
-    await update.message.reply_text(f"Error: {e}")
-```
-
+await update.message.reply_text(f"Error: {e}")
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
-await update.message.reply_text(“🎙 Transcribing…”)
+await update.message.reply_text(" Transcribing...")
 try:
 file = await ctx.bot.get_file(update.message.voice.file_id)
-with tempfile.NamedTemporaryFile(suffix=”.ogg”) as tmp:
+with tempfile.NamedTemporaryFile(suffix=".ogg") as tmp:
 await file.download_to_drive(tmp.name)
-with open(tmp.name,“rb”) as f: audio_b64 = base64.b64encode(f.read()).decode()
-r = client.messages.create(model=“claude-sonnet-4-20250514”, max_tokens=300,
-system=“Transcribe exactly. Return only transcription.”,
-messages=[{“role”:“user”,“content”:[{“type”:“document”,“source”:{“type”:“base64”,“media_type”:“audio/ogg”,“data”:audio_b64}},{“type”:“text”,“text”:“Transcribe.”}]}])
+with open(tmp.name,"rb") as f: audio_b64 = base64.b64encode(f.read()).decode()
+r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=300,
+system="Transcribe exactly. Return only transcription.",
+messages=[{"role":"user","content":[{"type":"document","source":{"type":"base64",
 transcript = r.content[0].text.strip()
-await update.message.reply_text(f”🎙 Heard: {transcript}”)
+await update.message.reply_text(f" Heard: {transcript}")
 update.message.text = transcript
 await handle_text(update, ctx)
 except Exception as e:
-await update.message.reply_text(f”Voice error: {e}”)
-
+await update.message.reply_text(f"Voice error: {e}")
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
-await update.message.reply_text(“📸 Reading screenshot…”)
+await update.message.reply_text(" Reading screenshot...")
 try:
 file = await ctx.bot.get_file(update.message.photo[-1].file_id)
-with tempfile.NamedTemporaryFile(suffix=”.jpg”) as tmp:
+with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
 await file.download_to_drive(tmp.name)
-with open(tmp.name,“rb”) as f: img_b64 = base64.b64encode(f.read()).decode()
+with open(tmp.name,"rb") as f: img_b64 = base64.b64encode(f.read()).decode()
 try:
 rows = get_rows()
-recent = “\n”.join([f”{r[0]}|{r[1]}|{r[2]}|{r[3]}” for r in rows[-10:] if len(r)>=4])
-except: recent = “”; rows = []
-entries = extract(update.message.caption or “”, img_b64=img_b64, recent=recent)
-if not entries or “error” in entries[0]:
-await update.message.reply_text(“Could not extract. Add a caption.”)
+recent = "\n".join([f"{r[0]}|{r[1]}|{r[2]}|{r[3]}" for r in rows[-10:] if len(r)>
+except: recent = ""; rows = []
+entries = extract(update.message.caption or "", img_b64=img_b64, recent=recent)
+if not entries or "error" in entries[0]:
+await update.message.reply_text("Could not extract. Add a caption.")
 return
-
-```
-    dup_found = check_duplicates(entries, rows)
-    ctx.user_data["pending"] = entries
-    ctx.user_data["waiting_edit"] = False
-    try: bal = get_balances()
-    except: bal = {}
-    await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found))
+dup_found = check_duplicates(entries, rows)
+ctx.user_data["pending"] = entries
+ctx.user_data["waiting_edit"] = False
+try: bal = get_balances()
+except: bal = {}
+await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found))
 except Exception as e:
-    await update.message.reply_text(f"Photo error: {e}")
-```
-
+await update.message.reply_text(f"Photo error: {e}")
 def main():
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler(“start”, start))
-app.add_handler(CommandHandler(“balances”, balances_cmd))
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("balances", balances_cmd))
 app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-logger.info(“Bot started…”)
+logger.info("Bot started...")
 app.run_polling()
-
-if **name** == “**main**”:
+if __name__ == "__main__":
 main()
