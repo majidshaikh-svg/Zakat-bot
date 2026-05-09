@@ -3,7 +3,7 @@ import anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-logging.basicConfig(format=”%(asctime)s - %(levelname)s - %(message)s”, level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(**name**)
 
 TELEGRAM_TOKEN  = os.environ[“TELEGRAM_TOKEN”]
