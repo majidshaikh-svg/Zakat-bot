@@ -1,7 +1,10 @@
-import os, json, logging, tempfile, base64, urllib.request, time, re
+import os, json, logging, tempfile, base64, urllib.request, time, re, io
 import anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -9,7 +12,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
-SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbzzE1itHnJ87R_ffxE5ZcRYth0Ds0_OOj46XGGjvW0gAi7CiE47L4ruTehZrefNY7uD/exec"
+SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbw_3U2AXK5xb7eg1pSP5bjxScgzJCP2KRLEpCDVMVwb4X03d5FZV94M0iah6D_XGa8i/exec"
+DRIVE_FOLDER_ID = "12IN60HhtI51r-3ahanzhCHdojlDuvsHG"
 CATEGORIES      = ["Zakat", "Khair", "Asanee"]
 
 CAT_ICON = {
@@ -21,23 +25,65 @@ CAT_ICON = {
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 
 CONFIRM_PROMPT = (
-    f"\nReply:\n"
-    f"  ✅ YES to confirm\n"
-    f"  ✏️ EDIT to correct\n"
-    f"  ❌ NO to cancel"
+    "\nReply:\n"
+    "  ✅ YES to confirm\n"
+    "  ✏️ EDIT to correct\n"
+    "  ❌ NO to cancel"
 )
 
 EDIT_HELP = (
-    f"✏️ What to fix? Tell me e.g.:\n"
-    f"  • \"1 is not a transaction\"\n"
-    f"  • \"remove 2\"\n"
-    f"  • \"3 is 50000\"\n"
-    f"  • \"date is 23 Apr 2026\"\n"
-    f"  • \"1 date is 23 Apr 2026\"\n"
-    f"  • \"details are Bhabhi Naseem through Rafay\"\n"
-    f"  • \"1 details are Bhabhi Naseem\""
+    "✏️ What to fix? Tell me e.g.:\n"
+    "  - 1 is not a transaction\n"
+    "  - remove 2\n"
+    "  - 3 is 50000\n"
+    "  - date is 23 Apr 2026\n"
+    "  - 1 date is 23 Apr 2026\n"
+    "  - details are Bhabhi Naseem through Rafay\n"
+    "  - 1 details are Bhabhi Naseem"
 )
 
+# --- Google Drive ---
+def get_drive_service():
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if not creds_json:
+        return None
+    try:
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds)
+    except Exception as e:
+        logger.error(f"Drive auth error: {e}")
+        return None
+
+def upload_to_drive(img_bytes, filename):
+    try:
+        service = get_drive_service()
+        if not service:
+            return ""
+        file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
+        media = MediaIoBaseUpload(io.BytesIO(img_bytes), mimetype="image/jpeg")
+        f = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        file_id = f.get("id")
+        service.permissions().create(fileId=file_id, body={"role": "reader", "type": "anyone"}).execute()
+        return f"https://drive.google.com/file/d/{file_id}/view"
+    except Exception as e:
+        logger.error(f"Drive upload error: {e}")
+        return ""
+
+def rename_drive_file(drive_link, new_name):
+    try:
+        service = get_drive_service()
+        if not service or not drive_link:
+            return
+        file_id = drive_link.split("/d/")[1].split("/")[0]
+        service.files().update(fileId=file_id, body={"name": new_name}).execute()
+    except Exception as e:
+        logger.error(f"Drive rename error: {e}")
+
+# --- Sheet functions ---
 def get_balances():
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
     with urllib.request.urlopen(url, timeout=15) as r:
@@ -56,13 +102,24 @@ def get_rows():
     with urllib.request.urlopen(url, timeout=15) as r:
         return json.loads(r.read().decode())
 
-def append_entry(date, amount, category, details):
-    # FIX: date is now passed correctly (was hardcoded as "")
-    data = json.dumps([date, amount, "", category, details]).encode()
+def append_entry(date, amount, category, details, drive_link="", raw_message="", input_type="text"):
+    payload = {
+        "action": "append",
+        "date": date,
+        "amount": amount,
+        "category": category,
+        "details": details,
+        "drive_link": drive_link,
+        "log_ref": "",
+        "input_type": input_type,
+        "raw_message": raw_message
+    }
+    data = json.dumps(payload).encode()
     req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
     req.add_header("Content-Type", "text/plain")
     with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode())
+        result = json.loads(r.read().decode())
+    return result.get("txn_id", ""), result.get("row", 0)
 
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
@@ -78,7 +135,6 @@ def format_balances(bal):
     return "\n".join(lines)
 
 def format_date_display(date_str):
-    """Normalize date display - strip raw ISO timestamps."""
     if not date_str:
         return "-"
     if "T" in date_str:
@@ -95,7 +151,6 @@ def format_date_display(date_str):
     return date_str
 
 def clean_details(details, amount, category):
-    """Remove amount/category repetition from details field."""
     if not details:
         return details
     cleaned = details
@@ -118,11 +173,15 @@ def format_entry_list(results, cat_filter=None):
         icon = CAT_ICON.get(e["category"], "💰")
         date_str = format_date_display(e["date"]) if e["date"] else "-"
         details = clean_details(e.get("details",""), e.get("amount",0), e.get("category",""))
-        msg += f"{i+1}. {icon} {e['category']} | PKR {fmt(e['amount'])} | 📅 {date_str}\n"
+        txn = e.get("txn_id", "")
+        txn_str = f" | {txn}" if txn else ""
+        msg += f"{i+1}. {icon} {e['category']} | PKR {fmt(e['amount'])} | 📅 {date_str}{txn_str}\n"
         if details:
             msg += f"   📝 {details}\n"
         msg += "\n"
     msg += f"{DIVIDER}\n💵 Total: PKR {fmt(total)}"
+    if any(e.get("txn_id") for e in results):
+        msg += "\n\nReply \"screenshot N\" or \"log N\" to see source"
     return msg
 
 def format_pending(entries):
@@ -138,20 +197,31 @@ def format_pending(entries):
     return msg
 
 def check_duplicates(entries, rows):
-    """Check last 20 rows for duplicates - skip rows with no date."""
     dup_found = []
-    recent_rows = [r for r in rows[-20:] if len(r) >= 5 and str(r[0]).strip()]
+    # New sheet: A=TXN, B=Date, C=Amount, D=Head, E=Category, F=Details
+    # Old sheet: A=Date, B=Amount, C=Head, D=Category, E=Details
+    # We detect by checking if row[0] looks like a TXN-ID
+    recent_rows = [r for r in rows[-20:] if len(r) >= 5]
     for row in recent_rows:
-        row_cat  = str(row[3]).strip()
-        row_det  = str(row[4]).strip()
-        row_date = str(row[0]).strip()
-        try: row_amt = float(str(row[1]).replace(",",""))
+        if str(row[0]).startswith("TXN-"):
+            row_date = str(row[1]).strip()
+            row_amt_str = str(row[2]).strip()
+            row_cat = str(row[4]).strip()
+            row_det = str(row[5]).strip() if len(row) > 5 else ""
+        else:
+            row_date = str(row[0]).strip()
+            row_amt_str = str(row[1]).strip()
+            row_cat = str(row[3]).strip() if len(row) > 3 else ""
+            row_det = str(row[4]).strip() if len(row) > 4 else ""
+        if not row_date:
+            continue
+        try: row_amt = float(row_amt_str.replace(",",""))
         except: continue
         for entry in entries:
-            same_amount   = int(row_amt) == int(entry.get("amount", -1))
+            same_amount = int(row_amt) == int(entry.get("amount", -1))
             same_category = row_cat.lower() == entry.get("category","").lower()
             det = entry.get("details","")
-            similar_desc  = (
+            similar_desc = (
                 row_det and det and (
                     row_det.lower() in det.lower() or
                     det.lower() in row_det.lower()
@@ -165,7 +235,6 @@ def check_duplicates(entries, rows):
     return dup_found
 
 def parse_date_string(date_text):
-    """Try to parse a natural date string into DD-Mon-YY format."""
     date_text = date_text.strip()
     months_map = {
         "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
@@ -174,39 +243,24 @@ def parse_date_string(date_text):
         "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
     }
     month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-
-    # Already in DD-Mon-YY
     if re.match(r'\d{1,2}-[A-Za-z]{3}-\d{2}$', date_text):
         return date_text
-
-    # "23 April 2026" or "23 Apr 2026" or "April 2026" (no day → use 1st)
     m = re.search(r'(\d{1,2})?\s*([A-Za-z]+)\s*(\d{2,4})', date_text, re.I)
     if m:
-        day   = int(m.group(1)) if m.group(1) else 1
-        mon   = m.group(2).lower()
-        year  = m.group(3)
+        day  = int(m.group(1)) if m.group(1) else 1
+        mon  = m.group(2).lower()
+        year = m.group(3)
         if len(year) == 4: year = year[2:]
         if mon in months_map:
             return f"{day:02d}-{month_names[months_map[mon]-1]}-{year}"
-
     return None
 
 def apply_corrections(entries, text):
-    """
-    Parse inline corrections:
-      - "remove 1" / "delete 2" / "1 is not a transaction"
-      - "3 is 50000"  → correct amount
-      - "date is 23 Apr 2026"  → set date on ALL entries
-      - "1 date is 23 Apr 2026" → set date on entry 1
-      - "details are Bhabhi Naseem" → set details on ALL entries
-      - "1 details are Bhabhi Naseem" → set details on entry 1
-    """
     corrections = []
     to_remove = set()
     tl = text.lower().strip()
-    entries = [dict(e) for e in entries]  # deep copy
+    entries = [dict(e) for e in entries]
 
-    # Remove / not a transaction
     for m in re.finditer(r'(?:remove|delete)\s+(\d+)', tl):
         idx = int(m.group(1)) - 1
         if 0 <= idx < len(entries):
@@ -219,7 +273,6 @@ def apply_corrections(entries, text):
             to_remove.add(idx)
             corrections.append(f"Removed entry {idx+1}")
 
-    # Amount correction: "3 is 50000"
     for m in re.finditer(r'(\d+)\s+is\s+([\d,]+)', text):
         idx = int(m.group(1)) - 1
         amt_str = m.group(2).replace(",","")
@@ -228,7 +281,6 @@ def apply_corrections(entries, text):
             entries[idx]["amount"] = int(amt_str)
             corrections.append(f"Entry {idx+1} amount: PKR {fmt(old)} → PKR {fmt(int(amt_str))}")
 
-    # Date correction: "1 date is 23 Apr 2026" or "date is 23 Apr 2026"
     m = re.search(r'(\d+)\s+date\s+is\s+(.+)', tl)
     if m:
         idx = int(m.group(1)) - 1
@@ -241,12 +293,11 @@ def apply_corrections(entries, text):
         if m:
             parsed = parse_date_string(m.group(1))
             if parsed:
-                for i, e in enumerate(entries):
+                for i in range(len(entries)):
                     if i not in to_remove:
                         entries[i]["date"] = parsed
                 corrections.append(f"Date set to {parsed} for all entries")
 
-    # Details correction: "1 details are X" or "details are X"
     m = re.search(r'(\d+)\s+details?\s+(?:are|is)\s+(.+)', text, re.I)
     if m:
         idx = int(m.group(1)) - 1
@@ -346,14 +397,44 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if tl in ["yes","y","confirm","ok"]:
         if pending:
             try:
+                saved_txns = []
+                raw_message = ctx.user_data.get("raw_message", "")
+                input_type = ctx.user_data.get("input_type", "text")
+                img_bytes = ctx.user_data.get("img_bytes", None)
+                drive_link = ""
+
+                # Upload screenshot once before saving entries
+                if img_bytes:
+                    tmp_name = f"TXN-tmp-{int(time.time())}.jpg"
+                    drive_link = upload_to_drive(img_bytes, tmp_name)
+
                 for entry in pending:
                     details = clean_details(entry.get("details",""), entry.get("amount",0), entry.get("category",""))
-                    append_entry(entry["date"], entry["amount"], entry["category"], details)
+                    txn_id, row = append_entry(
+                        entry["date"],
+                        entry["amount"],
+                        entry["category"],
+                        details,
+                        drive_link=drive_link,
+                        raw_message=raw_message,
+                        input_type=input_type
+                    )
+                    saved_txns.append(txn_id)
+
+                # Rename Drive file with first TXN-ID
+                if drive_link and saved_txns and saved_txns[0]:
+                    rename_drive_file(drive_link, f"{saved_txns[0]}.jpg")
+
                 new = get_balances()
                 ctx.user_data["pending"] = []
                 ctx.user_data["waiting_edit"] = False
+                ctx.user_data["img_bytes"] = None
+                ctx.user_data["raw_message"] = ""
+                ctx.user_data["input_type"] = "text"
+
+                txn_str = " | ".join(t for t in saved_txns if t)
                 msg = (
-                    f"✅ Saved!\n"
+                    f"✅ Saved! {txn_str}\n"
                     f"{DIVIDER}\n"
                     f"💳 New Balances:\n"
                     f"{format_balances(new)}"
@@ -369,6 +450,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if tl in ["no","cancel"]:
         ctx.user_data["pending"] = []
         ctx.user_data["waiting_edit"] = False
+        ctx.user_data["img_bytes"] = None
+        ctx.user_data["raw_message"] = ""
         await update.message.reply_text("❌ Cancelled.")
         return
 
@@ -390,7 +473,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return
             try: bal = get_balances()
             except: bal = {}
-            summary = "\n".join(f"  • {c}" for c in corrections)
+            summary = "\n".join(f"  - {c}" for c in corrections)
             msg = (
                 f"✏️ Updated:\n{summary}\n\n"
                 f"{format_pending(updated)}"
@@ -404,6 +487,36 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             ctx.user_data["waiting_edit"] = True
             await update.message.reply_text(f"Couldn't understand that correction.\n\n{EDIT_HELP}")
+        return
+
+    # --- Cross-reference: screenshot N or log N ---
+    m = re.match(r'(screenshot|photo|image|log|message)\s+(\d+)', tl)
+    if m:
+        ref_type = m.group(1)
+        ref_idx = int(m.group(2)) - 1
+        last_results = ctx.user_data.get("last_results", [])
+        if 0 <= ref_idx < len(last_results):
+            entry = last_results[ref_idx]
+            txn_id = entry.get("txn_id", "")
+            if ref_type in ["screenshot","photo","image"]:
+                drive_link = entry.get("drive_link", "")
+                if drive_link:
+                    await update.message.reply_text(f"📸 {txn_id} screenshot:\n{drive_link}")
+                else:
+                    await update.message.reply_text(f"No screenshot found for {txn_id}")
+            else:
+                raw = entry.get("raw_message", "")
+                input_t = entry.get("input_type", "")
+                if raw:
+                    await update.message.reply_text(
+                        f"📋 {txn_id} original message:\n"
+                        f"Type: {input_t}\n\n"
+                        f"{raw}"
+                    )
+                else:
+                    await update.message.reply_text(f"No log found for {txn_id}")
+        else:
+            await update.message.reply_text("Entry not found. Try searching first.")
         return
 
     # --- Search queries ---
@@ -437,25 +550,50 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         results = []
         for row in rows[1:]:
             if len(row) < 4: continue
-            date    = str(row[0]).strip()
-            amount  = str(row[1]).strip()
-            cat     = str(row[3]).strip() if len(row) > 3 else ""
-            details = str(row[4]).strip() if len(row) > 4 else ""
+            # Handle both old format (no TXN) and new format (with TXN)
+            if str(row[0]).startswith("TXN-"):
+                txn_id  = str(row[0]).strip()
+                date    = str(row[1]).strip()
+                amount  = str(row[2]).strip()
+                cat     = str(row[4]).strip() if len(row) > 4 else ""
+                details = str(row[5]).strip() if len(row) > 5 else ""
+                drive_link = str(row[6]).strip() if len(row) > 6 else ""
+                raw_msg = str(row[7]).strip() if len(row) > 7 else ""
+            else:
+                txn_id  = ""
+                date    = str(row[0]).strip()
+                amount  = str(row[1]).strip()
+                cat     = str(row[3]).strip() if len(row) > 3 else ""
+                details = str(row[4]).strip() if len(row) > 4 else ""
+                drive_link = ""
+                raw_msg = ""
+
             if cat not in CATEGORIES: continue
             if cat_filter and cat.lower() != cat_filter.lower(): continue
             if keyword and keyword.lower() not in details.lower() and keyword.lower() not in date.lower(): continue
             try: amt = float(str(amount).replace(",",""))
             except: amt = 0
-            results.append({"date":date,"amount":amt,"category":cat,"details":details})
+            results.append({
+                "txn_id": txn_id,
+                "date": date,
+                "amount": amt,
+                "category": cat,
+                "details": details,
+                "drive_link": drive_link,
+                "raw_message": raw_msg
+            })
         results = results[-n:]
         results.reverse()
         if not results:
             await update.message.reply_text("No entries found.")
             return
+        ctx.user_data["last_results"] = results
         await update.message.reply_text(format_entry_list(results, cat_filter))
         return
 
     # --- Extract new entry ---
+    ctx.user_data["raw_message"] = text
+    ctx.user_data["input_type"] = "text"
     await update.message.reply_text("🔍 Analyzing...")
     try:
         rows = get_rows()
@@ -490,6 +628,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             messages=[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"audio/ogg","data":audio_b64}},{"type":"text","text":"Transcribe."}]}])
         transcript = r.content[0].text.strip()
         await update.message.reply_text(f"🎙 Heard: {transcript}")
+        ctx.user_data["raw_message"] = transcript
+        ctx.user_data["input_type"] = "voice"
         update.message.text = transcript
         await handle_text(update, ctx)
     except Exception as e:
@@ -502,12 +642,21 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         file = await ctx.bot.get_file(update.message.photo[-1].file_id)
         with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
             await file.download_to_drive(tmp.name)
-            with open(tmp.name,"rb") as f: img_b64 = base64.b64encode(f.read()).decode()
+            with open(tmp.name,"rb") as f:
+                img_bytes = f.read()
+                img_b64 = base64.b64encode(img_bytes).decode()
+
+        caption = update.message.caption or ""
+        ctx.user_data["raw_message"] = caption or "[screenshot]"
+        ctx.user_data["input_type"] = "screenshot"
+        ctx.user_data["img_bytes"] = img_bytes
+
         try:
             rows = get_rows()
-            recent = "\n".join([f"{r[0]}|{r[1]}|{r[2]}|{r[3]}" for r in rows[-10:] if len(r)>=4])
+            recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
         except: recent = ""; rows = []
-        entries = extract(update.message.caption or "", img_b64=img_b64, recent=recent)
+
+        entries = extract(caption, img_b64=img_b64, recent=recent)
         if not entries or "error" in entries[0]:
             await update.message.reply_text("Could not extract. Add a caption.")
             return
