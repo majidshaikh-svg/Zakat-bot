@@ -89,13 +89,14 @@ def get_balances():
     with urllib.request.urlopen(url, timeout=15) as r:
         rows = json.loads(r.read().decode())
     bal = {"Zakat": 0, "Khair": 0, "Asanee": 0}
-    try: bal["Khair"]  = float(str(rows[4][10]).replace(",","").replace(" ",""))
+    try: bal["Khair"]  = float(str(rows[4][12]).replace(",","").replace(" ",""))
     except: pass
-    try: bal["Zakat"]  = float(str(rows[4][15]).replace(",","").replace(" ",""))
+    try: bal["Zakat"]  = float(str(rows[4][17]).replace(",","").replace(" ",""))
     except: pass
-    try: bal["Asanee"] = float(str(rows[4][20]).replace(",","").replace(" ",""))
+    try: bal["Asanee"] = float(str(rows[4][22]).replace(",","").replace(" ",""))
     except: pass
     return bal
+
 
 def get_rows():
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
