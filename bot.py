@@ -209,10 +209,10 @@ def check_duplicates(entries, rows):
             row_cat = str(row[4]).strip()
             row_det = str(row[5]).strip() if len(row) > 5 else ""
         else:
-            row_date = str(row[0]).strip()
-            row_amt_str = str(row[1]).strip()
-            row_cat = str(row[3]).strip() if len(row) > 3 else ""
-            row_det = str(row[4]).strip() if len(row) > 4 else ""
+            row_date = str(row[1]).strip()
+            row_amt_str = str(row[2]).strip()
+            row_cat = str(row[4]).strip() if len(row) > 4 else ""
+            row_det = str(row[5]).strip() if len(row) > 5 else ""
         if not row_date:
             continue
         try: row_amt = float(row_amt_str.replace(",",""))
@@ -561,10 +561,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 raw_msg = str(row[7]).strip() if len(row) > 7 else ""
             else:
                 txn_id  = ""
-                date    = str(row[0]).strip()
-                amount  = str(row[1]).strip()
-                cat     = str(row[3]).strip() if len(row) > 3 else ""
-                details = str(row[4]).strip() if len(row) > 4 else ""
+                date    = str(row[1]).strip()
+                amount  = str(row[2]).strip()
+                cat     = str(row[4]).strip() if len(row) > 4 else ""
+                details = str(row[5]).strip() if len(row) > 5 else ""
                 drive_link = ""
                 raw_msg = ""
 
