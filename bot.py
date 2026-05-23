@@ -65,9 +65,18 @@ def upload_to_drive(img_bytes, filename):
             return ""
         file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(io.BytesIO(img_bytes), mimetype="image/jpeg")
-        f = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        f = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True
+        ).execute()
         file_id = f.get("id")
-        service.permissions().create(fileId=file_id, body={"role": "reader", "type": "anyone"}).execute()
+        service.permissions().create(
+            fileId=file_id,
+            body={"role": "reader", "type": "anyone"},
+            supportsAllDrives=True
+        ).execute()
         return f"https://drive.google.com/file/d/{file_id}/view"
     except Exception as e:
         logger.error(f"Drive upload error: {e}")
