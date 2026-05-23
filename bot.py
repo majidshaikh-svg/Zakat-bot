@@ -2,9 +2,6 @@ import os, json, logging, tempfile, base64, urllib.request, time, re, io
 import anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -12,8 +9,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
-SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbw_3U2AXK5xb7eg1pSP5bjxScgzJCP2KRLEpCDVMVwb4X03d5FZV94M0iah6D_XGa8i/exec"
-DRIVE_FOLDER_ID = "12IN60HhtI51r-3ahanzhCHdojlDuvsHG"
+SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbwhmUb9Hte02CyhImlEVFjCgKHxAWOTWeuDUGrjDur2YH9WEbgWUU-yMnCWpfc3gdYl/exec"
 CATEGORIES      = ["Zakat", "Khair", "Asanee"]
 
 CAT_ICON = {
@@ -42,53 +38,42 @@ EDIT_HELP = (
     "  - 1 details are Bhabhi Naseem"
 )
 
-# --- Google Drive ---
-def get_drive_service():
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
-    if not creds_json:
-        return None
-    try:
-        creds_dict = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        logger.error(f"Drive auth error: {e}")
-        return None
-
+# --- Google Drive upload via Apps Script ---
 def upload_to_drive(img_bytes, filename):
+    """Upload image via Apps Script which runs as the user account."""
     try:
-        service = get_drive_service()
-        if not service:
-            return ""
-        file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
-        media = MediaIoBaseUpload(io.BytesIO(img_bytes), mimetype="image/jpeg")
-        f = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id",
-            supportsAllDrives=True
-        ).execute()
-        file_id = f.get("id")
-        service.permissions().create(
-            fileId=file_id,
-            body={"role": "reader", "type": "anyone"},
-            supportsAllDrives=True
-        ).execute()
-        return f"https://drive.google.com/file/d/{file_id}/view"
+        img_b64 = base64.b64encode(img_bytes).decode()
+        payload = {
+            "action": "upload_image",
+            "filename": filename,
+            "image_b64": img_b64
+        }
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
+        req.add_header("Content-Type", "text/plain")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            result = json.loads(r.read().decode())
+        return result.get("drive_link", "")
     except Exception as e:
         logger.error(f"Drive upload error: {e}")
         return ""
 
 def rename_drive_file(drive_link, new_name):
+    """Rename via Apps Script."""
     try:
-        service = get_drive_service()
-        if not service or not drive_link:
+        if not drive_link:
             return
         file_id = drive_link.split("/d/")[1].split("/")[0]
-        service.files().update(fileId=file_id, body={"name": new_name}).execute()
+        payload = {
+            "action": "rename_file",
+            "file_id": file_id,
+            "new_name": new_name
+        }
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
+        req.add_header("Content-Type", "text/plain")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            pass
     except Exception as e:
         logger.error(f"Drive rename error: {e}")
 
