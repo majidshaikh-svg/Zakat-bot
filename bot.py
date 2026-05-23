@@ -97,7 +97,6 @@ def get_balances():
     except: pass
     return bal
 
-
 def get_rows():
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
     with urllib.request.urlopen(url, timeout=15) as r:
@@ -598,7 +597,15 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Analyzing...")
     try:
         rows = get_rows()
-        recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
+        recent_rows = rows[-10:]
+        recent_parts = []
+        for r in recent_rows:
+            if len(r) < 4: continue
+            if str(r[0]).startswith("TXN-"):
+                recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
+            else:
+                recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
+        recent = "\n".join(recent_parts)
     except: recent = ""; rows = []
     try:
         entries = extract(text, recent=recent)
@@ -654,7 +661,15 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         try:
             rows = get_rows()
-            recent = "\n".join([f"{r[0]}|{r[1]}|{r[3]}|{r[4]}" for r in rows[-10:] if len(r)>=5])
+            recent_rows = rows[-10:]
+            recent_parts = []
+            for r in recent_rows:
+                if len(r) < 4: continue
+                if str(r[0]).startswith("TXN-"):
+                    recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
+                else:
+                    recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
+            recent = "\n".join(recent_parts)
         except: recent = ""; rows = []
 
         entries = extract(caption, img_b64=img_b64, recent=recent)
