@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
-SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbw74wPDTDVepT_TeTWET0Q0LUwioK2bfVsGivML-sIsHr9Nqxvp1VGtitW9R0KD9uC6/exec"
+SCRIPT_URL      = "https://script.google.com/macros/s/AKfycbwcUq-_msKg1pb_0VKHMZIcxoz4heumA5NuwtPyW82YaMyEN4PVX8OkgngWHR8vQaOQ/exec"
 CATEGORIES      = ["Zakat", "Khair", "Asanee"]
 
 CAT_ICON = {
