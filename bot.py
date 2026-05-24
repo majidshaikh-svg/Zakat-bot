@@ -1,4 +1,9 @@
 import os, json, logging, tempfile, base64, urllib.request, time, re, io
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except:
+    PIL_AVAILABLE = False
 import anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -39,6 +44,32 @@ EDIT_HELP = (
 )
 
 # --- Google Drive upload via Apps Script ---
+def compress_image(img_bytes, max_kb=500):
+    """Compress image to under max_kb kilobytes."""
+    if not PIL_AVAILABLE:
+        return img_bytes
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        # Resize if too large
+        max_dim = 1200
+        if img.width > max_dim or img.height > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+        # Compress
+        output = io.BytesIO()
+        quality = 85
+        while quality >= 30:
+            output.seek(0)
+            output.truncate()
+            img.save(output, format="JPEG", quality=quality, optimize=True)
+            if output.tell() <= max_kb * 1024:
+                break
+            quality -= 10
+        return output.getvalue()
+    except Exception as e:
+        logger.error(f"Compress error: {e}")
+        return img_bytes
+
+
 def upload_to_drive(img_bytes, filename):
     """Upload image via Apps Script which runs as the user account."""
     try:
@@ -400,7 +431,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 # Upload screenshot once before saving entries
                 if img_bytes:
                     tmp_name = f"TXN-tmp-{int(time.time())}.jpg"
-                    drive_link = upload_to_drive(img_bytes, tmp_name)
+                    compressed = compress_image(img_bytes)
+                    drive_link = upload_to_drive(compressed, tmp_name)
 
                 for entry in pending:
                     details = clean_details(entry.get("details",""), entry.get("amount",0), entry.get("category",""))
