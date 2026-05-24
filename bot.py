@@ -74,19 +74,26 @@ def upload_to_drive(img_bytes, filename):
     """Upload image via Apps Script which runs as the user account."""
     try:
         img_b64 = base64.b64encode(img_bytes).decode()
+        size_kb = len(img_b64) / 1024
+        logger.info(f"Drive upload: {filename}, size={size_kb:.0f}KB")
         payload = {
             "action": "upload_image",
             "filename": filename,
             "image_b64": img_b64
         }
         data = json.dumps(payload).encode()
+        logger.info(f"Drive upload: sending {len(data)/1024:.0f}KB to Apps Script")
         req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
         req.add_header("Content-Type", "text/plain")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            result = json.loads(r.read().decode())
-        return result.get("drive_link", "")
+        with urllib.request.urlopen(req, timeout=60) as r:
+            response_text = r.read().decode()
+            logger.info(f"Drive upload response: {response_text[:200]}")
+            result = json.loads(response_text)
+        link = result.get("drive_link", "")
+        logger.info(f"Drive upload success: {link}")
+        return link
     except Exception as e:
-        logger.error(f"Drive upload error: {e}")
+        logger.error(f"Drive upload error: {type(e).__name__}: {e}")
         return ""
 
 def rename_drive_file(drive_link, new_name):
