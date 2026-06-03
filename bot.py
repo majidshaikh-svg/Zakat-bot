@@ -1,4 +1,4 @@
-import os, json, logging, tempfile, base64, urllib.request, time, re, io, threading
+import os, json, logging, tempfile, base64, urllib.request, time, re, io
 try:
     from PIL import Image
     PIL_AVAILABLE = True
@@ -719,11 +719,97 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Photo error: {e}")
 
+
+# ══════════════════════════════════════════════════════
+# FLASK API — Finance Hub endpoints
+# ══════════════════════════════════════════════════════
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+flask_app = Flask(__name__)
+CORS(flask_app)
+
+def row_to_entry(row):
+    if str(row[0]).startswith("TXN-"):
+        txn_id=str(row[0]).strip(); date=str(row[1]).strip(); amount=str(row[2]).strip()
+        cat=str(row[4]).strip() if len(row)>4 else ""; details=str(row[5]).strip() if len(row)>5 else ""
+        drive_link=str(row[6]).strip() if len(row)>6 else ""; raw_msg=str(row[7]).strip() if len(row)>7 else ""
+    else:
+        txn_id=""; date=str(row[1]).strip(); amount=str(row[2]).strip()
+        cat=str(row[4]).strip() if len(row)>4 else ""; details=str(row[5]).strip() if len(row)>5 else ""
+        drive_link=""; raw_msg=""
+    if cat not in CATEGORIES: return None
+    try: amt=float(str(amount).replace(",",""))
+    except: amt=0
+    return {"txn_id":txn_id,"date":date,"amount":amt,"category":cat,"details":details,"drive_link":drive_link,"raw_message":raw_msg,"input_type":""}
+
+@flask_app.route("/api/health")
+def api_health():
+    return jsonify({"status":"ok","service":"Finance Hub - Zakat API"})
+
+@flask_app.route("/api/balances")
+def api_balances():
+    try: return jsonify(get_balances())
+    except Exception as e: return jsonify({"error":str(e)}),500
+
+@flask_app.route("/api/transactions")
+def api_transactions():
+    try:
+        limit=int(request.args.get("limit",20))
+        cat_filter=request.args.get("category",None)
+        rows=get_rows(); results=[]
+        for row in rows[1:]:
+            if len(row)<5: continue
+            e=row_to_entry(row)
+            if not e: continue
+            if cat_filter and e["category"].lower()!=cat_filter.lower(): continue
+            results.append(e)
+        return jsonify({"transactions":list(reversed(results[-limit:]))})
+    except Exception as e: return jsonify({"error":str(e)}),500
+
+@flask_app.route("/api/analyze",methods=["POST"])
+def api_analyze():
+    try:
+        data=request.get_json(); text=data.get("text",""); img_b64=data.get("image_b64",None)
+        rows=get_rows()
+        recent_parts=[]
+        for r in rows[-10:]:
+            if len(r)<4: continue
+            if str(r[0]).startswith("TXN-"): recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
+            else: recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
+        entries=extract(text,img_b64=img_b64,recent="\n".join(recent_parts))
+        if not entries or "error" in entries[0]: return jsonify({"error":entries[0].get("error","unknown") if entries else "unknown"}),400
+        e=entries[0]; dup=check_duplicates(entries,rows)
+        e["confidence"]=78 if dup else 92; e["dup_warning"]=dup[0] if dup else None
+        return jsonify(e)
+    except Exception as ex: return jsonify({"error":str(ex)}),500
+
+@flask_app.route("/api/save",methods=["POST"])
+def api_save():
+    try:
+        data=request.get_json()
+        date=data.get("date",time.strftime("%d-%b-%y")); amount=data.get("amount",0)
+        category=data.get("category","Zakat"); details_raw=data.get("details","")
+        drive_link=data.get("drive_link",""); input_type=data.get("input_type","app")
+        img_b64=data.get("image_b64",None)
+        details=clean_details(details_raw,amount,category)
+        if img_b64 and not drive_link:
+            img_bytes=base64.b64decode(img_b64); compressed=compress_image(img_bytes)
+            drive_link=upload_to_drive(compressed,f"TXN-tmp-{int(time.time())}.jpg")
+        txn_id,row=append_entry(date,amount,category,details,drive_link=drive_link,raw_message=details_raw,input_type=input_type)
+        if drive_link and txn_id: rename_drive_file(drive_link,f"{txn_id}.jpg")
+        return jsonify({"success":True,"txn_id":txn_id,"row":row,"balances":get_balances()})
+    except Exception as e: return jsonify({"error":str(e)}),500
+
+def run_flask():
+    port=int(os.environ.get("PORT",8080))
+    flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
+
 def main():
     # Start Flask API in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("Flask API started on PORT env")
+    logger.info("Flask API started")
 
     # Start Telegram bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -737,162 +823,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# ══════════════════════════════════════════════════════
-# FLASK API — Finance Hub endpoints
-# Runs alongside Telegram bot on same Railway service
-# ══════════════════════════════════════════════════════
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import threading
-
-flask_app = Flask(__name__)
-CORS(flask_app)
-
-def get_recent_str(rows):
-    """Build recent entries string for Claude context."""
-    recent_parts = []
-    for r in rows[-10:]:
-        if len(r) < 4: continue
-        if str(r[0]).startswith("TXN-"):
-            recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
-        else:
-            recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
-    return "\n".join(recent_parts)
-
-def row_to_entry(row):
-    """Convert a sheet row to entry dict handling old + new format."""
-    if str(row[0]).startswith("TXN-"):
-        txn_id     = str(row[0]).strip()
-        date       = str(row[1]).strip()
-        amount     = str(row[2]).strip()
-        cat        = str(row[4]).strip() if len(row) > 4 else ""
-        details    = str(row[5]).strip() if len(row) > 5 else ""
-        drive_link = str(row[6]).strip() if len(row) > 6 else ""
-        raw_msg    = str(row[7]).strip() if len(row) > 7 else ""
-        input_type = ""
-    else:
-        txn_id     = ""
-        date       = str(row[1]).strip()
-        amount     = str(row[2]).strip()
-        cat        = str(row[4]).strip() if len(row) > 4 else ""
-        details    = str(row[5]).strip() if len(row) > 5 else ""
-        drive_link = ""
-        raw_msg    = ""
-        input_type = ""
-    if cat not in CATEGORIES:
-        return None
-    try:
-        amt = float(str(amount).replace(",", ""))
-    except:
-        amt = 0
-    return {
-        "txn_id": txn_id, "date": date, "amount": amt,
-        "category": cat, "details": details,
-        "drive_link": drive_link, "raw_message": raw_msg,
-        "input_type": input_type
-    }
-
-@flask_app.route("/api/health", methods=["GET"])
-def api_health():
-    return jsonify({"status": "ok", "service": "Finance Hub - Zakat API"})
-
-@flask_app.route("/api/balances", methods=["GET"])
-def api_balances():
-    try:
-        bal = get_balances()
-        return jsonify(bal)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@flask_app.route("/api/transactions", methods=["GET"])
-def api_transactions():
-    try:
-        limit = int(request.args.get("limit", 20))
-        cat_filter = request.args.get("category", None)
-        rows = get_rows()
-        results = []
-        for row in rows[1:]:
-            if len(row) < 5: continue
-            entry = row_to_entry(row)
-            if not entry: continue
-            if cat_filter and entry["category"].lower() != cat_filter.lower(): continue
-            results.append(entry)
-        results = list(reversed(results[-limit:]))
-        return jsonify({"transactions": results, "total": len(results)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@flask_app.route("/api/analyze", methods=["POST"])
-def api_analyze():
-    try:
-        data = request.get_json()
-        text       = data.get("text", "")
-        img_b64    = data.get("image_b64", None)
-        input_type = data.get("type", "text")
-        rows = get_rows()
-        recent = get_recent_str(rows)
-        entries = extract(text, img_b64=img_b64, recent=recent)
-        if not entries or "error" in entries[0]:
-            err = entries[0].get("error", "unknown") if entries else "unknown"
-            return jsonify({"error": err}), 400
-        e = entries[0]
-        # Check for duplicates
-        dup_found = check_duplicates(entries, rows)
-        confidence = 78 if dup_found else 92
-        e["confidence"] = confidence
-        e["input_type"] = input_type
-        e["dup_warning"] = dup_found[0] if dup_found else None
-        return jsonify(e)
-    except Exception as ex:
-        logger.error(f"API analyze error: {ex}")
-        return jsonify({"error": str(ex)}), 500
-
-@flask_app.route("/api/save", methods=["POST"])
-def api_save():
-    try:
-        data        = request.get_json()
-        date        = data.get("date", time.strftime("%d-%b-%y"))
-        amount      = data.get("amount", 0)
-        category    = data.get("category", "Zakat")
-        details_raw = data.get("details", "")
-        drive_link  = data.get("drive_link", "")
-        input_type  = data.get("input_type", "app")
-        img_b64     = data.get("image_b64", None)
-
-        # Clean details
-        details = clean_details(details_raw, amount, category)
-
-        # Upload image to Drive if provided
-        if img_b64 and not drive_link:
-            img_bytes = base64.b64decode(img_b64)
-            compressed = compress_image(img_bytes)
-            tmp_name = f"TXN-tmp-{int(time.time())}.jpg"
-            drive_link = upload_to_drive(compressed, tmp_name)
-
-        txn_id, row = append_entry(
-            date, amount, category, details,
-            drive_link=drive_link,
-            raw_message=details_raw,
-            input_type=input_type
-        )
-
-        # Rename drive file with TXN-ID
-        if drive_link and txn_id:
-            rename_drive_file(drive_link, f"{txn_id}.jpg")
-
-        new_bal = get_balances()
-        return jsonify({
-            "success": True,
-            "txn_id": txn_id,
-            "row": row,
-            "balances": new_bal
-        })
-    except Exception as e:
-        logger.error(f"API save error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
