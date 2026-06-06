@@ -799,22 +799,50 @@ def api_charity_insights():
             r.headers["Access-Control-Allow-Origin"] = "*"
             return r, 200
 
+        today = time.strftime("%d-%B-%Y")
+        current_month = time.strftime("%B %Y")
         prompt = f"""You are analysing Zakat and charity transaction history for Majid.
+Today's date is {today}. Current month is {current_month}.
 
 Here are the last {len(last_100)} transactions (oldest to newest):
+Format: TXN_DATE | HEAD/CHANNEL | AMOUNT | CATEGORY | DETAILS
+Note: TXN_DATE is when entry was recorded. DETAILS contains the actual coverage period.
 {chr(10).join(last_100)}
 
-IMPORTANT: Many transactions have a coverage period mentioned in the details field.
-Use this to understand what period was actually paid, not just the entry date.
-If details say "Dr Malla zakat - covers Dec 2025 to Feb 2026" then Dr Malla IS paid for that period.
+═══ CRITICAL INSTRUCTIONS ═══
 
-Analyse and generate exactly 4 insights as a JSON array.
+DATE INTERPRETATION:
+- TXN_DATE = entry date only — do NOT use for gap analysis
+- DETAILS field contains actual coverage period — always read this first
+- Example: details "Bhabhi Naseem - covers Jan to Mar 2026" means paid up to Mar 2026
+- Only flag missing AFTER the coverage period has expired
 
-Focus on:
-1. Missing recurring payments — only flag if recipient has ZERO entries in last 90 days AND had consistent payments before. Check details for coverage periods.
-2. Unusual gaps — frequency broken based on actual coverage periods
-3. Positive patterns — consistent giving worth noting
-4. Any anomalies or suggestions
+RECIPIENT FREQUENCY:
+- WEEKLY (flag if no entry in last 10 days): Biryani Dubai
+- MONTHLY (flag if no entry in last 45 days): Bhabhi Naseem, Bhabhi Madiha, Panoaqil Homes, Langar
+- ANNUAL/SEASONAL (NEVER flag as missing): Ramadan giving, Eid giving, Waja Mine, Daig, any Masjid donation
+- Do NOT flag any recipient not in the above lists unless clearly monthly
+
+CURRENT DATE RULES:
+- Today is {today} — do NOT flag as missing if last paid in current or previous month
+- Ramadan is annual — never flag outside Ramadan season
+- Eid ul Fitr and Eid ul Adha are twice yearly — never flag these
+- Never say "missing since June 2026" if we are currently in June 2026
+
+NAMING CONTEXT:
+- "Mama Raja", "Ada Lala", "Bhabhi Naseem", "Bhabhi Madiha", "Maulana Jamshed" are people
+- "through Rafay/Asif/Kamran" means via that person as a channel — not the recipient
+- Panoaqil, Karachi, Dubai, Bahrain are LOCATIONS not recipients
+- "Panoaqil Homes" is a specific charity — track separately from location "Panoaqil"
+- "Biryani Dubai" is a weekly food charity in Dubai — track weekly
+
+BALANCE CONTEXT:
+- Negative Khair balance = more given than received — this is POSITIVE, never flag as problem
+- Only comment on balances if truly anomalous
+
+Analyse and generate exactly 4 insights.
+Priority order: weekly missing > monthly missing > positive patterns > general observations.
+Include at least 1 positive insight.
 
 Each insight must have:
 - "type": "warning" | "amber" | "positive"
