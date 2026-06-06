@@ -43,18 +43,14 @@ EDIT_HELP = (
     "  - 1 details are Bhabhi Naseem"
 )
 
-# --- Google Drive upload via Apps Script ---
 def compress_image(img_bytes, max_kb=500):
-    """Compress image to under max_kb kilobytes."""
     if not PIL_AVAILABLE:
         return img_bytes
     try:
         img = Image.open(io.BytesIO(img_bytes))
-        # Resize if too large
         max_dim = 1200
         if img.width > max_dim or img.height > max_dim:
             img.thumbnail((max_dim, max_dim), Image.LANCZOS)
-        # Compress
         output = io.BytesIO()
         quality = 85
         while quality >= 30:
@@ -69,18 +65,12 @@ def compress_image(img_bytes, max_kb=500):
         logger.error(f"Compress error: {e}")
         return img_bytes
 
-
 def upload_to_drive(img_bytes, filename):
-    """Upload image via Apps Script which runs as the user account."""
     try:
         img_b64 = base64.b64encode(img_bytes).decode()
         size_kb = len(img_b64) / 1024
         logger.info(f"Drive upload: {filename}, size={size_kb:.0f}KB")
-        payload = {
-            "action": "upload_image",
-            "filename": filename,
-            "image_b64": img_b64
-        }
+        payload = {"action": "upload_image", "filename": filename, "image_b64": img_b64}
         data = json.dumps(payload).encode()
         logger.info(f"Drive upload: sending {len(data)/1024:.0f}KB to Apps Script")
         req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
@@ -97,16 +87,11 @@ def upload_to_drive(img_bytes, filename):
         return ""
 
 def rename_drive_file(drive_link, new_name):
-    """Rename via Apps Script."""
     try:
         if not drive_link:
             return
         file_id = drive_link.split("/d/")[1].split("/")[0]
-        payload = {
-            "action": "rename_file",
-            "file_id": file_id,
-            "new_name": new_name
-        }
+        payload = {"action": "rename_file", "file_id": file_id, "new_name": new_name}
         data = json.dumps(payload).encode()
         req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
         req.add_header("Content-Type", "text/plain")
@@ -115,7 +100,6 @@ def rename_drive_file(drive_link, new_name):
     except Exception as e:
         logger.error(f"Drive rename error: {e}")
 
-# --- Sheet functions ---
 def get_balances():
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
     with urllib.request.urlopen(url, timeout=15) as r:
@@ -136,15 +120,9 @@ def get_rows():
 
 def append_entry(date, amount, category, details, drive_link="", raw_message="", input_type="text"):
     payload = {
-        "action": "append",
-        "date": date,
-        "amount": amount,
-        "category": category,
-        "details": details,
-        "drive_link": drive_link,
-        "log_ref": "",
-        "input_type": input_type,
-        "raw_message": raw_message
+        "action": "append", "date": date, "amount": amount,
+        "category": category, "details": details, "drive_link": drive_link,
+        "log_ref": "", "input_type": input_type, "raw_message": raw_message
     }
     data = json.dumps(payload).encode()
     req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
@@ -230,9 +208,6 @@ def format_pending(entries):
 
 def check_duplicates(entries, rows):
     dup_found = []
-    # New sheet: A=TXN, B=Date, C=Amount, D=Head, E=Category, F=Details
-    # Old sheet: A=Date, B=Amount, C=Head, D=Category, E=Details
-    # We detect by checking if row[0] looks like a TXN-ID
     recent_rows = [r for r in rows[-20:] if len(r) >= 5]
     for row in recent_rows:
         if str(row[0]).startswith("TXN-"):
@@ -292,19 +267,16 @@ def apply_corrections(entries, text):
     to_remove = set()
     tl = text.lower().strip()
     entries = [dict(e) for e in entries]
-
     for m in re.finditer(r'(?:remove|delete)\s+(\d+)', tl):
         idx = int(m.group(1)) - 1
         if 0 <= idx < len(entries):
             to_remove.add(idx)
             corrections.append(f"Removed entry {idx+1}")
-
     for m in re.finditer(r'(\d+)\s+is\s+not\s+a\s+transaction', tl):
         idx = int(m.group(1)) - 1
         if 0 <= idx < len(entries):
             to_remove.add(idx)
             corrections.append(f"Removed entry {idx+1}")
-
     for m in re.finditer(r'(\d+)\s+is\s+([\d,]+)', text):
         idx = int(m.group(1)) - 1
         amt_str = m.group(2).replace(",","")
@@ -312,7 +284,6 @@ def apply_corrections(entries, text):
             old = entries[idx]["amount"]
             entries[idx]["amount"] = int(amt_str)
             corrections.append(f"Entry {idx+1} amount: PKR {fmt(old)} → PKR {fmt(int(amt_str))}")
-
     m = re.search(r'(\d+)\s+date\s+is\s+(.+)', tl)
     if m:
         idx = int(m.group(1)) - 1
@@ -329,7 +300,6 @@ def apply_corrections(entries, text):
                     if i not in to_remove:
                         entries[i]["date"] = parsed
                 corrections.append(f"Date set to {parsed} for all entries")
-
     m = re.search(r'(\d+)\s+details?\s+(?:are|is)\s+(.+)', text, re.I)
     if m:
         idx = int(m.group(1)) - 1
@@ -345,7 +315,6 @@ def apply_corrections(entries, text):
                 if i not in to_remove:
                     entries[i]["details"] = new_det
             corrections.append(f"Details set to: {new_det}")
-
     updated = [e for i, e in enumerate(entries) if i not in to_remove]
     return updated, corrections
 
@@ -409,11 +378,7 @@ async def balances_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
     try:
         bal = get_balances()
-        msg = (
-            f"💳 Balances\n"
-            f"{DIVIDER}\n"
-            f"{format_balances(bal)}"
-        )
+        msg = (f"💳 Balances\n{DIVIDER}\n{format_balances(bal)}")
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
@@ -425,7 +390,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pending = ctx.user_data.get("pending", [])
     waiting_edit = ctx.user_data.get("waiting_edit", False)
 
-    # --- YES ---
     if tl in ["yes","y","confirm","ok"]:
         if pending:
             try:
@@ -434,44 +398,27 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 input_type = ctx.user_data.get("input_type", "text")
                 img_bytes = ctx.user_data.get("img_bytes", None)
                 drive_link = ""
-
-                # Upload screenshot once before saving entries
                 if img_bytes:
                     tmp_name = f"TXN-tmp-{int(time.time())}.jpg"
                     compressed = compress_image(img_bytes)
                     drive_link = upload_to_drive(compressed, tmp_name)
-
                 for entry in pending:
                     details = clean_details(entry.get("details",""), entry.get("amount",0), entry.get("category",""))
                     txn_id, row = append_entry(
-                        entry["date"],
-                        entry["amount"],
-                        entry["category"],
-                        details,
-                        drive_link=drive_link,
-                        raw_message=raw_message,
-                        input_type=input_type
+                        entry["date"], entry["amount"], entry["category"], details,
+                        drive_link=drive_link, raw_message=raw_message, input_type=input_type
                     )
                     saved_txns.append(txn_id)
-
-                # Rename Drive file with first TXN-ID
                 if drive_link and saved_txns and saved_txns[0]:
                     rename_drive_file(drive_link, f"{saved_txns[0]}.jpg")
-
                 new = get_balances()
                 ctx.user_data["pending"] = []
                 ctx.user_data["waiting_edit"] = False
                 ctx.user_data["img_bytes"] = None
                 ctx.user_data["raw_message"] = ""
                 ctx.user_data["input_type"] = "text"
-
                 txn_str = " | ".join(t for t in saved_txns if t)
-                msg = (
-                    f"✅ Saved! {txn_str}\n"
-                    f"{DIVIDER}\n"
-                    f"💳 New Balances:\n"
-                    f"{format_balances(new)}"
-                )
+                msg = (f"✅ Saved! {txn_str}\n{DIVIDER}\n💳 New Balances:\n{format_balances(new)}")
                 await update.message.reply_text(msg)
             except Exception as e:
                 await update.message.reply_text(f"Error saving: {e}")
@@ -479,7 +426,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No pending entry.")
         return
 
-    # --- NO ---
     if tl in ["no","cancel"]:
         ctx.user_data["pending"] = []
         ctx.user_data["waiting_edit"] = False
@@ -488,13 +434,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Cancelled.")
         return
 
-    # --- EDIT ---
     if tl in ["edit","e"] and pending:
         ctx.user_data["waiting_edit"] = True
         await update.message.reply_text(EDIT_HELP)
         return
 
-    # --- Handle edit instructions ---
     if waiting_edit and pending:
         updated, corrections = apply_corrections(list(pending), text)
         ctx.user_data["waiting_edit"] = False
@@ -522,7 +466,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Couldn't understand that correction.\n\n{EDIT_HELP}")
         return
 
-    # --- Cross-reference: screenshot N or log N ---
     m = re.match(r'(screenshot|photo|image|log|message)\s+(\d+)', tl)
     if m:
         ref_type = m.group(1)
@@ -541,25 +484,19 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 raw = entry.get("raw_message", "")
                 input_t = entry.get("input_type", "")
                 if raw:
-                    await update.message.reply_text(
-                        f"📋 {txn_id} original message:\n"
-                        f"Type: {input_t}\n\n"
-                        f"{raw}"
-                    )
+                    await update.message.reply_text(f"📋 {txn_id} original message:\nType: {input_t}\n\n{raw}")
                 else:
                     await update.message.reply_text(f"No log found for {txn_id}")
         else:
             await update.message.reply_text("Entry not found. Try searching first.")
         return
 
-    # --- Search queries ---
     if any(w in tl for w in ["last","show","share","find","search","entries","list"]):
         try:
             rows = get_rows()
         except Exception as e:
             await update.message.reply_text(f"Could not load sheet: {e}")
             return
-
         n = 10
         for word in tl.split():
             if word.isdigit(): n = int(word)
@@ -568,7 +505,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if cat.lower() in tl:
                 cat_filter = cat
                 break
-
         keyword = None
         m = re.search(r'mention(?:ing)?\s+(\w+)', tl)
         if m: keyword = m.group(1)
@@ -579,42 +515,23 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     if len(parts) > 1 and parts[-1].strip():
                         keyword = parts[-1].strip().split()[0]
                     break
-
         results = []
         for row in rows[1:]:
             if len(row) < 4: continue
-            # Handle both old format (no TXN) and new format (with TXN)
             if str(row[0]).startswith("TXN-"):
-                txn_id  = str(row[0]).strip()
-                date    = str(row[1]).strip()
-                amount  = str(row[2]).strip()
-                cat     = str(row[4]).strip() if len(row) > 4 else ""
-                details = str(row[5]).strip() if len(row) > 5 else ""
-                drive_link = str(row[6]).strip() if len(row) > 6 else ""
-                raw_msg = str(row[7]).strip() if len(row) > 7 else ""
+                txn_id=str(row[0]).strip(); date=str(row[1]).strip(); amount=str(row[2]).strip()
+                cat=str(row[4]).strip() if len(row)>4 else ""; details=str(row[5]).strip() if len(row)>5 else ""
+                drive_link=str(row[6]).strip() if len(row)>6 else ""; raw_msg=str(row[7]).strip() if len(row)>7 else ""
             else:
-                txn_id  = ""
-                date    = str(row[1]).strip()
-                amount  = str(row[2]).strip()
-                cat     = str(row[4]).strip() if len(row) > 4 else ""
-                details = str(row[5]).strip() if len(row) > 5 else ""
-                drive_link = ""
-                raw_msg = ""
-
+                txn_id=""; date=str(row[1]).strip(); amount=str(row[2]).strip()
+                cat=str(row[4]).strip() if len(row)>4 else ""; details=str(row[5]).strip() if len(row)>5 else ""
+                drive_link=""; raw_msg=""
             if cat not in CATEGORIES: continue
             if cat_filter and cat.lower() != cat_filter.lower(): continue
             if keyword and keyword.lower() not in details.lower() and keyword.lower() not in date.lower(): continue
             try: amt = float(str(amount).replace(",",""))
             except: amt = 0
-            results.append({
-                "txn_id": txn_id,
-                "date": date,
-                "amount": amt,
-                "category": cat,
-                "details": details,
-                "drive_link": drive_link,
-                "raw_message": raw_msg
-            })
+            results.append({"txn_id":txn_id,"date":date,"amount":amt,"category":cat,"details":details,"drive_link":drive_link,"raw_message":raw_msg})
         results = results[-n:]
         results.reverse()
         if not results:
@@ -624,7 +541,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(format_entry_list(results, cat_filter))
         return
 
-    # --- Extract new entry ---
     ctx.user_data["raw_message"] = text
     ctx.user_data["input_type"] = "text"
     await update.message.reply_text("🔍 Analyzing...")
@@ -634,10 +550,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         recent_parts = []
         for r in recent_rows:
             if len(r) < 4: continue
-            if str(r[0]).startswith("TXN-"):
-                recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
-            else:
-                recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
+            if str(r[0]).startswith("TXN-"): recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
+            else: recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
         recent = "\n".join(recent_parts)
     except: recent = ""; rows = []
     try:
@@ -646,7 +560,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             err = entries[0].get("error","unknown") if entries else "unknown"
             await update.message.reply_text(f"Could not extract: {err}\n\nTry again.")
             return
-
         dup_found = check_duplicates(entries, rows)
         ctx.user_data["pending"] = entries
         ctx.user_data["waiting_edit"] = False
@@ -686,30 +599,24 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             with open(tmp.name,"rb") as f:
                 img_bytes = f.read()
                 img_b64 = base64.b64encode(img_bytes).decode()
-
         caption = update.message.caption or ""
         ctx.user_data["raw_message"] = caption or "[screenshot]"
         ctx.user_data["input_type"] = "screenshot"
         ctx.user_data["img_bytes"] = img_bytes
-
         try:
             rows = get_rows()
             recent_rows = rows[-10:]
             recent_parts = []
             for r in recent_rows:
                 if len(r) < 4: continue
-                if str(r[0]).startswith("TXN-"):
-                    recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
-                else:
-                    recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
+                if str(r[0]).startswith("TXN-"): recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
+                else: recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
             recent = "\n".join(recent_parts)
         except: recent = ""; rows = []
-
         entries = extract(caption, img_b64=img_b64, recent=recent)
         if not entries or "error" in entries[0]:
             await update.message.reply_text("Could not extract. Add a caption.")
             return
-
         dup_found = check_duplicates(entries, rows)
         ctx.user_data["pending"] = entries
         ctx.user_data["waiting_edit"] = False
@@ -721,7 +628,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════════
-# FLASK API — Finance Hub endpoints
+# FLASK API
 # ══════════════════════════════════════════════════════
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -767,7 +674,7 @@ def api_transactions():
         return jsonify({"transactions":list(reversed(results[-limit:]))})
     except Exception as e: return jsonify({"error":str(e)}),500
 
-@flask_app.route("/api/analyze",methods=["POST"])
+@flask_app.route("/api/analyze", methods=["POST"])
 def api_analyze():
     try:
         data=request.get_json(); text=data.get("text",""); img_b64=data.get("image_b64",None)
@@ -784,7 +691,7 @@ def api_analyze():
         return jsonify(e)
     except Exception as ex: return jsonify({"error":str(ex)}),500
 
-@flask_app.route("/api/save",methods=["POST"])
+@flask_app.route("/api/save", methods=["POST"])
 def api_save():
     try:
         data=request.get_json()
@@ -801,17 +708,93 @@ def api_save():
         return jsonify({"success":True,"txn_id":txn_id,"row":row,"balances":get_balances()})
     except Exception as e: return jsonify({"error":str(e)}),500
 
+# ── NEW: Charity Insights endpoint ──
+@flask_app.route("/api/charity/insights", methods=["GET","OPTIONS"])
+def api_charity_insights():
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        rows = get_rows()
+        data_rows = []
+        for row in rows[1:]:
+            if len(row) < 5: continue
+            if str(row[0]).startswith("TXN-"):
+                date=str(row[1]).strip(); amount=str(row[2]).strip()
+                head=str(row[3]).strip(); cat=str(row[4]).strip()
+                details=str(row[5]).strip() if len(row)>5 else ""
+            else:
+                date=str(row[1]).strip(); amount=str(row[2]).strip()
+                head=str(row[3]).strip(); cat=str(row[4]).strip()
+                details=str(row[5]).strip() if len(row)>5 else ""
+            if cat not in CATEGORIES: continue
+            try: float(str(amount).replace(",",""))
+            except: continue
+            data_rows.append(f"{date} | {head} | PKR {amount} | {cat} | {details}")
+
+        last_100 = data_rows[-100:] if len(data_rows) > 100 else data_rows
+
+        if not last_100:
+            r = jsonify({"insights": [], "error": "No transactions found"})
+            r.headers["Access-Control-Allow-Origin"] = "*"
+            return r, 200
+
+        prompt = f"""You are analysing Zakat and charity transaction history for Majid.
+
+Here are the last {len(last_100)} transactions (oldest to newest):
+{chr(10).join(last_100)}
+
+Analyse these transactions and generate exactly 4 insights as a JSON array.
+
+Focus on:
+1. Missing recurring payments — people/causes paid regularly but not recently
+2. Unusual gaps — frequency broken
+3. Positive patterns — consistent giving worth noting
+4. Any anomalies or suggestions
+
+Each insight must have:
+- "type": "warning" | "amber" | "positive"
+- "text": concise insight, max 15 words, mention specific name/cause
+
+Prioritise the last 60 days as most credible.
+
+Return ONLY a JSON array, no other text:
+[
+  {{"type": "warning", "text": "..."}},
+  {{"type": "amber",   "text": "..."}},
+  {{"type": "positive","text": "..."}},
+  {{"type": "warning", "text": "..."}}
+]"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        raw = raw.strip()
+        insights = json.loads(raw)
+        r = jsonify({"insights": insights, "generated": time.strftime("%Y-%m-%d %H:%M")})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        r = jsonify({"error": str(e), "insights": []})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
 
 def main():
-    # Start Flask API in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask API started")
-
-    # Start Telegram bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balances", balances_cmd))
@@ -823,4 +806,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
