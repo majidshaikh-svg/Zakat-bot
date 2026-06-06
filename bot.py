@@ -357,6 +357,13 @@ Recent entries:
             e["date"] = today
     return result
 
+# Pakistan-based recipients that need a channel mentioned
+PAKISTAN_RECIPIENTS = [
+    "bhabhi naseem", "bhabhi madiha", "maulana jamshed",
+    "ada lala", "mama raja", "panoaqil homes",
+    "dr malla", "mufti najeeb", "homes"
+]
+
 def check_period_warning(entries, raw_text=""):
     """Check if any entry is missing a coverage period in details."""
     warnings = []
@@ -368,6 +375,24 @@ def check_period_warning(entries, raw_text=""):
             warnings.append(
                 f"  {icon} Entry {i+1}: {e.get('details','—')} | PKR {fmt(e.get('amount',0))}"
             )
+    return warnings
+
+def check_channel_warning(entries, raw_text=""):
+    """Check if Pakistan-based recipients are missing a channel/through mention."""
+    warnings = []
+    channel_keywords = ["through", "via", "rafay", "asif", "kamran", "direct", "bank", "transfer", "easypaisa", "jazzcash"]
+    for i, e in enumerate(entries):
+        details = e.get("details", "")
+        combined = (details + " " + raw_text).lower()
+        # Check if recipient is Pakistan-based
+        is_pak_recipient = any(r in combined for r in PAKISTAN_RECIPIENTS)
+        if is_pak_recipient:
+            has_channel = any(kw in combined for kw in channel_keywords)
+            if not has_channel:
+                icon = CAT_ICON.get(e.get("category",""), "💰")
+                warnings.append(
+                    f"  {icon} Entry {i+1}: {e.get('details','—')} | PKR {fmt(e.get('amount',0))}"
+                )
     return warnings
 
 def build_confirmation_msg(entries, bal, dup_found, raw_text=""):
@@ -382,16 +407,25 @@ def build_confirmation_msg(entries, bal, dup_found, raw_text=""):
     if dup_found:
         msg += f"⚠️ Possible duplicate found:\n\n" + "\n\n".join(dup_found[:3]) + f"\n\n{DIVIDER}\n"
 
-    # Period warning
-    period_warnings = check_period_warning(entries, raw_text)
-    if period_warnings:
-        msg += (
-            f"📅 No coverage period mentioned:\n"
-            + "\n".join(period_warnings) + "\n\n"
-            f"Please add the period covered e.g.:\n"
-            f"  details are Dr Malla zakat - Dec 2025 to Feb 2026\n\n"
-            f"{DIVIDER}\n"
-        )
+    # Collect all warnings
+    period_warnings  = check_period_warning(entries, raw_text)
+    channel_warnings = check_channel_warning(entries, raw_text)
+
+    if period_warnings or channel_warnings:
+        msg += f"📋 A few things to check:\n\n"
+        if period_warnings:
+            msg += (
+                f"📅 No coverage period mentioned:\n"
+                + "\n".join(period_warnings) + "\n"
+                f"   e.g. \"covers Jan to Mar 2026\"\n\n"
+            )
+        if channel_warnings:
+            msg += (
+                f"👤 No channel mentioned (Pakistan recipient):\n"
+                + "\n".join(channel_warnings) + "\n"
+                f"   e.g. \"through Rafay\" or \"direct bank transfer\"\n\n"
+            )
+        msg += f"{DIVIDER}\n"
 
     msg += CONFIRM_PROMPT
     return msg
@@ -491,14 +525,24 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: bal = {}
             summary = "\n".join(f"  - {c}" for c in corrections)
             raw_text = ctx.user_data.get("raw_message", "")
-            period_warnings = check_period_warning(updated, raw_text)
+            period_warnings  = check_period_warning(updated, raw_text)
+            channel_warnings = check_channel_warning(updated, raw_text)
             period_msg = ""
-            if period_warnings:
-                period_msg = (
-                    f"\n📅 Still no coverage period mentioned:\n"
-                    + "\n".join(period_warnings) + "\n"
-                    f"e.g. details are Dr Malla zakat - Dec 2025 to Feb 2026\n"
-                )
+            if period_warnings or channel_warnings:
+                period_msg = f"\n📋 Still missing:\n"
+                if period_warnings:
+                    period_msg += (
+                        f"📅 No coverage period:\n"
+                        + "\n".join(period_warnings) + "\n"
+                        f"   e.g. \"covers Jan to Mar 2026\"\n"
+                    )
+                if channel_warnings:
+                    period_msg += (
+                        f"👤 No channel (Pakistan recipient):\n"
+                        + "\n".join(channel_warnings) + "\n"
+                        f"   e.g. \"through Rafay\"\n"
+                    )
+                period_msg += "\n"
             msg = (
                 f"✏️ Updated:\n{summary}\n\n"
                 f"{format_pending(updated)}"
@@ -742,9 +786,11 @@ def api_analyze():
         dup=check_duplicates(entries,rows)
         e["confidence"]=78 if dup else 92
         e["dup_warning"]=dup[0] if dup else None
-        # Period warning for app
-        period_warnings = check_period_warning(entries, text)
-        e["period_warning"] = len(period_warnings) > 0
+        # Period and channel warnings for app
+        period_warnings  = check_period_warning(entries, text)
+        channel_warnings = check_channel_warning(entries, text)
+        e["period_warning"]  = len(period_warnings) > 0
+        e["channel_warning"] = len(channel_warnings) > 0
         return jsonify(e)
     except Exception as ex:
         return jsonify({"error":str(ex)}),500
