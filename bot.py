@@ -39,9 +39,23 @@ EDIT_HELP = (
     "  - 3 is 50000\n"
     "  - date is 23 Apr 2026\n"
     "  - 1 date is 23 Apr 2026\n"
-    "  - details are Bhabhi Naseem through Rafay\n"
+    "  - details are Bhabhi Naseem through Rafay - covers Jan 2026\n"
     "  - 1 details are Bhabhi Naseem"
 )
+
+# Period keywords — if none found in details, warn user
+PERIOD_KEYWORDS = [
+    "jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec",
+    "ramadan","eid","monthly","quarter","annual","yearly","last month",
+    "this month","2024","2025","2026","covers","period","from","to"
+]
+
+def has_period(text):
+    """Check if text contains a period/coverage reference."""
+    if not text:
+        return False
+    tl = text.lower()
+    return any(kw in tl for kw in PERIOD_KEYWORDS)
 
 def compress_image(img_bytes, max_kb=500):
     if not PIL_AVAILABLE:
@@ -72,15 +86,12 @@ def upload_to_drive(img_bytes, filename):
         logger.info(f"Drive upload: {filename}, size={size_kb:.0f}KB")
         payload = {"action": "upload_image", "filename": filename, "image_b64": img_b64}
         data = json.dumps(payload).encode()
-        logger.info(f"Drive upload: sending {len(data)/1024:.0f}KB to Apps Script")
         req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
         req.add_header("Content-Type", "text/plain")
         with urllib.request.urlopen(req, timeout=60) as r:
             response_text = r.read().decode()
-            logger.info(f"Drive upload response: {response_text[:200]}")
             result = json.loads(response_text)
         link = result.get("drive_link", "")
-        logger.info(f"Drive upload success: {link}")
         return link
     except Exception as e:
         logger.error(f"Drive upload error: {type(e).__name__}: {e}")
@@ -326,14 +337,15 @@ def extract(text, img_b64=None, recent=""):
     today = time.strftime("%d-%b-%y")
     system = f"""Extract ALL charity payment entries. Categories: Zakat, Khair, Asanee.
 Return ONLY a JSON array:
-[{{"date":"19-Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja"}}]
+[{{"date":"19-Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja - covers Jan 2026"}}]
 If nothing found: [{{"error":"reason"}}]
 Rules:
 - Amount in PKR. 1m=1000000, 1 lakh=100000, 1k=1000
-- Date format DD-Mon-YY e.g. 19-Apr-26
-- IMPORTANT: If the user mentions a specific date or month, use that date. Only use today ({today}) if absolutely no date is mentioned.
+- Date column = today ({today}) — the date this entry is being recorded
+- Details MUST include the coverage period if mentioned (e.g. "Dr Malla zakat - covers Dec 2025 to Feb 2026")
+- If user mentions a period/month/year in their message, always include it in details
 - Fix spelling mistakes in category names
-- Details should be clean human-readable description only. Do NOT repeat the amount or category in details.
+- Details should be clean human-readable description. Do NOT repeat the amount or category.
 Recent entries:
 {recent}"""
     r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1000, system=system, messages=[{"role":"user","content":content}])
@@ -345,7 +357,20 @@ Recent entries:
             e["date"] = today
     return result
 
-def build_confirmation_msg(entries, bal, dup_found):
+def check_period_warning(entries, raw_text=""):
+    """Check if any entry is missing a coverage period in details."""
+    warnings = []
+    for i, e in enumerate(entries):
+        details = e.get("details", "")
+        combined = (details + " " + raw_text).lower()
+        if not has_period(combined):
+            icon = CAT_ICON.get(e.get("category",""), "💰")
+            warnings.append(
+                f"  {icon} Entry {i+1}: {e.get('details','—')} | PKR {fmt(e.get('amount',0))}"
+            )
+    return warnings
+
+def build_confirmation_msg(entries, bal, dup_found, raw_text=""):
     msg = (
         f"✅ {len(entries)} entr{'y' if len(entries)==1 else 'ies'} found:\n\n"
         f"{format_pending(entries)}"
@@ -356,6 +381,18 @@ def build_confirmation_msg(entries, bal, dup_found):
     )
     if dup_found:
         msg += f"⚠️ Possible duplicate found:\n\n" + "\n\n".join(dup_found[:3]) + f"\n\n{DIVIDER}\n"
+
+    # Period warning
+    period_warnings = check_period_warning(entries, raw_text)
+    if period_warnings:
+        msg += (
+            f"📅 No coverage period mentioned:\n"
+            + "\n".join(period_warnings) + "\n\n"
+            f"Please add the period covered e.g.:\n"
+            f"  details are Dr Malla zakat - Dec 2025 to Feb 2026\n\n"
+            f"{DIVIDER}\n"
+        )
+
     msg += CONFIRM_PROMPT
     return msg
 
@@ -368,7 +405,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"💳 Balances:\n"
             f"{format_balances(bal)}\n"
             f"{DIVIDER}\n"
-            f"📩 Send text, voice or screenshot!"
+            f"📩 Send text, voice or screenshot!\n"
+            f"💡 Tip: Always mention the period covered\n"
+            f"   e.g. Dr Malla zakat - covers Jan to Mar 2026"
         )
         await update.message.reply_text(msg)
     except Exception as e:
@@ -451,6 +490,15 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try: bal = get_balances()
             except: bal = {}
             summary = "\n".join(f"  - {c}" for c in corrections)
+            raw_text = ctx.user_data.get("raw_message", "")
+            period_warnings = check_period_warning(updated, raw_text)
+            period_msg = ""
+            if period_warnings:
+                period_msg = (
+                    f"\n📅 Still no coverage period mentioned:\n"
+                    + "\n".join(period_warnings) + "\n"
+                    f"e.g. details are Dr Malla zakat - Dec 2025 to Feb 2026\n"
+                )
             msg = (
                 f"✏️ Updated:\n{summary}\n\n"
                 f"{format_pending(updated)}"
@@ -458,6 +506,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"💳 Current Balances:\n"
                 f"{format_balances(bal)}\n"
                 f"{DIVIDER}\n"
+                f"{period_msg}"
                 f"{CONFIRM_PROMPT}"
             )
             await update.message.reply_text(msg)
@@ -565,7 +614,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["waiting_edit"] = False
         try: bal = get_balances()
         except: bal = {}
-        await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found))
+        await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found, raw_text=text))
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
@@ -622,7 +671,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["waiting_edit"] = False
         try: bal = get_balances()
         except: bal = {}
-        await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found))
+        await update.message.reply_text(build_confirmation_msg(entries, bal, dup_found, raw_text=caption))
     except Exception as e:
         await update.message.reply_text(f"Photo error: {e}")
 
@@ -677,7 +726,9 @@ def api_transactions():
 @flask_app.route("/api/analyze", methods=["POST"])
 def api_analyze():
     try:
-        data=request.get_json(); text=data.get("text",""); img_b64=data.get("image_b64",None)
+        data=request.get_json()
+        text=data.get("text","")
+        img_b64=data.get("image_b64",None)
         rows=get_rows()
         recent_parts=[]
         for r in rows[-10:]:
@@ -685,11 +736,18 @@ def api_analyze():
             if str(r[0]).startswith("TXN-"): recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
             else: recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
         entries=extract(text,img_b64=img_b64,recent="\n".join(recent_parts))
-        if not entries or "error" in entries[0]: return jsonify({"error":entries[0].get("error","unknown") if entries else "unknown"}),400
-        e=entries[0]; dup=check_duplicates(entries,rows)
-        e["confidence"]=78 if dup else 92; e["dup_warning"]=dup[0] if dup else None
+        if not entries or "error" in entries[0]:
+            return jsonify({"error":entries[0].get("error","unknown") if entries else "unknown"}),400
+        e=entries[0]
+        dup=check_duplicates(entries,rows)
+        e["confidence"]=78 if dup else 92
+        e["dup_warning"]=dup[0] if dup else None
+        # Period warning for app
+        period_warnings = check_period_warning(entries, text)
+        e["period_warning"] = len(period_warnings) > 0
         return jsonify(e)
-    except Exception as ex: return jsonify({"error":str(ex)}),500
+    except Exception as ex:
+        return jsonify({"error":str(ex)}),500
 
 @flask_app.route("/api/save", methods=["POST"])
 def api_save():
@@ -708,7 +766,6 @@ def api_save():
         return jsonify({"success":True,"txn_id":txn_id,"row":row,"balances":get_balances()})
     except Exception as e: return jsonify({"error":str(e)}),500
 
-# ── NEW: Charity Insights endpoint ──
 @flask_app.route("/api/charity/insights", methods=["GET","OPTIONS"])
 def api_charity_insights():
     if request.method == "OPTIONS":
@@ -732,7 +789,8 @@ def api_charity_insights():
             if cat not in CATEGORIES: continue
             try: float(str(amount).replace(",",""))
             except: continue
-            data_rows.append(f"{date} | {head} | PKR {amount} | {cat} | {details}")
+            display_date = date if date.strip() else time.strftime("%d-%b-%y")
+            data_rows.append(f"{display_date} | {head} | PKR {amount} | {cat} | {details}")
 
         last_100 = data_rows[-100:] if len(data_rows) > 100 else data_rows
 
@@ -746,21 +804,23 @@ def api_charity_insights():
 Here are the last {len(last_100)} transactions (oldest to newest):
 {chr(10).join(last_100)}
 
-Analyse these transactions and generate exactly 4 insights as a JSON array.
+IMPORTANT: Many transactions have a coverage period mentioned in the details field.
+Use this to understand what period was actually paid, not just the entry date.
+If details say "Dr Malla zakat - covers Dec 2025 to Feb 2026" then Dr Malla IS paid for that period.
+
+Analyse and generate exactly 4 insights as a JSON array.
 
 Focus on:
-1. Missing recurring payments — people/causes paid regularly but not recently
-2. Unusual gaps — frequency broken
+1. Missing recurring payments — only flag if recipient has ZERO entries in last 90 days AND had consistent payments before. Check details for coverage periods.
+2. Unusual gaps — frequency broken based on actual coverage periods
 3. Positive patterns — consistent giving worth noting
 4. Any anomalies or suggestions
 
 Each insight must have:
 - "type": "warning" | "amber" | "positive"
-- "text": concise insight, max 15 words, mention specific name/cause
+- "text": concise, max 15 words, mention specific name/cause
 
-Prioritise the last 60 days as most credible.
-
-Return ONLY a JSON array, no other text:
+Return ONLY a JSON array:
 [
   {{"type": "warning", "text": "..."}},
   {{"type": "amber",   "text": "..."}},
