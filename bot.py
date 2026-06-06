@@ -921,6 +921,109 @@ Return ONLY a JSON array:
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 500
 
+@flask_app.route("/api/search", methods=["POST","OPTIONS"])
+def api_search():
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        data = request.get_json()
+        query = data.get("query", "").strip()
+        if not query:
+            return jsonify({"error": "No query provided"}), 400
+
+        # Load all transactions
+        rows = get_rows()
+        all_txns = []
+        for row in rows[1:]:
+            e = row_to_entry(row)
+            if e:
+                all_txns.append(e)
+
+        if not all_txns:
+            r = jsonify({"answer": "No transactions found.", "transactions": []})
+            r.headers["Access-Control-Allow-Origin"] = "*"
+            return r, 200
+
+        # Format transactions for Claude
+        txn_lines = []
+        for t in all_txns:
+            txn_lines.append(
+                f"{t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
+                f"{t.get('category','')} | {t.get('details','')}"
+            )
+
+        today_str = time.strftime("%d-%B-%Y")
+
+        prompt = f"""You are a charity transaction search assistant for Majid.
+Today is {today_str}.
+
+Here are ALL transactions (oldest to newest):
+TXN_ID | DATE | AMOUNT | CATEGORY | DETAILS
+{chr(10).join(txn_lines)}
+
+User query: "{query}"
+
+Instructions:
+- Answer the query accurately based on the transaction data above
+- For "last N X entries" — return the most recent N transactions matching X
+- For amount queries — sum and show totals
+- For name queries — find all entries mentioning that name in details
+- For period queries — look in details field for coverage periods
+- Be specific with numbers and dates
+- Keep answer concise — 1-2 sentences max
+
+Return a JSON object:
+{{
+  "answer": "Natural language answer to the query",
+  "txn_ids": ["TXN-001", "TXN-002"]
+}}
+
+txn_ids should be the IDs of transactions most relevant to the query (max 15).
+If no TXN IDs available, return empty array.
+Return ONLY the JSON, no other text."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        raw = raw.strip()
+
+        result = json.loads(raw)
+        answer = result.get("answer", "")
+        txn_ids = result.get("txn_ids", [])
+
+        # Match returned txn_ids to full transaction objects
+        matched_txns = []
+        if txn_ids:
+            id_set = set(txn_ids)
+            matched_txns = [t for t in all_txns if t.get("txn_id","") in id_set]
+        
+        # If no IDs but we have answer, return last 10 as context
+        if not matched_txns and answer:
+            matched_txns = list(reversed(all_txns[-10:]))
+
+        r = jsonify({
+            "answer": answer,
+            "transactions": matched_txns[:15],
+            "total": len(matched_txns)
+        })
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e), "answer": "Search failed — try again.", "transactions": []})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
