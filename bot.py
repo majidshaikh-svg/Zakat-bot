@@ -1006,10 +1006,9 @@ Return ONLY the JSON, no other text."""
         if txn_ids:
             id_set = set(txn_ids)
             matched_txns = [t for t in all_txns if t.get("txn_id","") in id_set]
-        
-        # If no IDs but we have answer, return last 10 as context
-if not matched_txns and answer:
-    matched_txns = []
+
+        if not matched_txns:
+            matched_txns = []
 
         r = jsonify({
             "answer": answer,
