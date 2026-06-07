@@ -934,7 +934,6 @@ def api_search():
         if not query:
             return jsonify({"error": "No query provided"}), 400
 
-        # Load all transactions
         rows = get_rows()
         all_txns = []
         for row in rows[1:]:
@@ -947,11 +946,11 @@ def api_search():
             r.headers["Access-Control-Allow-Origin"] = "*"
             return r, 200
 
-        # Format transactions for Claude
+        # Format with index prefix for reliable matching
         txn_lines = []
-        for t in all_txns:
+        for i, t in enumerate(all_txns):
             txn_lines.append(
-                f"{t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
+                f"[{i}] {t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
                 f"{t.get('category','')} | {t.get('details','')}"
             )
 
@@ -960,34 +959,31 @@ def api_search():
         prompt = f"""You are a charity transaction search assistant for Majid.
 Today is {today_str}.
 
-Here are ALL transactions (oldest to newest):
-TXN_ID | DATE | AMOUNT | CATEGORY | DETAILS
+Transactions (oldest to newest), each prefixed with [index]:
 {chr(10).join(txn_lines)}
 
 User query: "{query}"
 
 Instructions:
-- Answer the query accurately based on the transaction data above
-- For "last N X entries" — return the most recent N transactions matching X
-- For amount queries — sum and show totals
-- For name queries — find all entries mentioning that name in details
-- For period queries — look in details field for coverage periods
-- Be specific with numbers and dates
-- Keep answer concise — 1-2 sentences max
+- Answer the query accurately
+- For "last N X entries" — return most recent N matching X category or name
+- For name queries — search DETAILS field
+- For amount queries — calculate and show totals
+- Format all dates as "15 May 2026" style
+- Keep answer to 1-2 sentences
 
-Return a JSON object:
+Return ONLY this JSON:
 {{
-  "answer": "Natural language answer to the query",
-  "txn_ids": ["TXN-001", "TXN-002"]
+  "answer": "concise answer here",
+  "txn_indices": [5, 3, 1]
 }}
 
-txn_ids should be the IDs of transactions most relevant to the query (max 15).
-If no TXN IDs available, return empty array.
-Return ONLY the JSON, no other text."""
+txn_indices: [index] numbers of matching rows, most recent first, max 15.
+Return ONLY the JSON."""
 
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=800,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}]
         )
 
@@ -999,22 +995,21 @@ Return ONLY the JSON, no other text."""
 
         result = json.loads(raw)
         answer = result.get("answer", "")
-        txn_ids = result.get("txn_ids", [])
+        txn_indices = result.get("txn_indices", [])
 
-        # Match returned txn_ids to full transaction objects
-        matched_txns = []
-        if txn_ids:
-            id_set = set(txn_ids)
-            matched_txns = [t for t in all_txns if t.get("txn_id","") in id_set]
+        matched_txns = [all_txns[i] for i in txn_indices if 0 <= i < len(all_txns)]
 
-        if not matched_txns:
-            matched_txns = []
+        # Clean dates
+        import datetime
+        for t in matched_txns:
+            raw_date = t.get("date", "")
+            if "T" in raw_date:
+                try:
+                    d = datetime.datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                    t["date"] = d.strftime("%d %b %Y")
+                except: pass
 
-        r = jsonify({
-            "answer": answer,
-            "transactions": matched_txns[:15],
-            "total": len(matched_txns)
-        })
+        r = jsonify({"answer": answer, "transactions": matched_txns[:15], "total": len(matched_txns)})
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 200
 
