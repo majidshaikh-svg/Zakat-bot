@@ -1059,11 +1059,14 @@ Return ONLY JSON:
   "title": "...",
   "people": ["Mobin", "Mehtab"],
   "priority": "urgent",
+  "priority_explicit": true,
   "due_date": "2026-06-10",
   "subject": "Autonomous ERP",
   "category": "adnoc",
   "detail": "..."
-}}"""
+}}
+
+priority_explicit: true only if user clearly stated urgent/high/medium/normal/critical/asap. false if you inferred it."""
 
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
