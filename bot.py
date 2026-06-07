@@ -1018,6 +1018,75 @@ Return ONLY the JSON."""
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 500
 
+
+@flask_app.route("/api/pulse/extract", methods=["POST","OPTIONS"])
+def api_pulse_extract():
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        data = request.get_json()
+        text = data.get("text", "").strip()
+        people_list = data.get("people", [])  # existing people from Supabase
+
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+
+        today = time.strftime("%d %B %Y")
+
+        prompt = f"""Extract action details from this free text entry. Today is {today}.
+
+Text: "{text}"
+
+Known people in the system: {', '.join(people_list)}
+
+Extract:
+1. title: Main action/task (concise, max 8 words)
+2. people: List of people mentioned (match to known people list where possible)
+3. priority: "urgent" | "high" | "normal" (infer from words like urgent/asap/critical/important)
+4. due_date: ISO date YYYY-MM-DD (parse natural dates like "10th June", "next week", "tomorrow")
+5. subject: Main topic/project (e.g. "Autonomous ERP", "XRG", "Hiring", "Karachi Property")
+6. category: "adnoc" | "eyai" | "personal"
+   - adnoc: if mentions ADNOC people (Mobin, Fahad, Omar, Mehtab, George, Alharith) or ADNOC projects
+   - eyai: if mentions EY AI, AI Hub, EY projects
+   - personal: family, property, zakat, personal matters
+7. detail: Any additional context from the text
+
+Return ONLY JSON:
+{{
+  "title": "...",
+  "people": ["Mobin", "Mehtab"],
+  "priority": "urgent",
+  "due_date": "2026-06-10",
+  "subject": "Autonomous ERP",
+  "category": "adnoc",
+  "detail": "..."
+}}"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        raw = raw.strip()
+
+        result = json.loads(raw)
+        r = jsonify(result)
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
