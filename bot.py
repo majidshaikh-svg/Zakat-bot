@@ -1008,8 +1008,8 @@ Return ONLY the JSON, no other text."""
             matched_txns = [t for t in all_txns if t.get("txn_id","") in id_set]
         
         # If no IDs but we have answer, return last 10 as context
-        if not matched_txns and answer:
-            matched_txns = list(reversed(all_txns[-10:]))
+if not matched_txns and answer:
+    matched_txns = []
 
         r = jsonify({
             "answer": answer,
