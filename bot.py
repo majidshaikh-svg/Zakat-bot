@@ -1090,6 +1090,59 @@ priority_explicit: true only if user clearly stated urgent/high/medium/normal/cr
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 500
 
+
+@flask_app.route("/api/transcribe", methods=["POST","OPTIONS"])
+def api_transcribe():
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        if 'audio' not in request.files:
+            return jsonify({"error": "No audio file"}), 400
+
+        audio_file = request.files['audio']
+        audio_data = audio_file.read()
+
+        # Use Claude to transcribe via base64
+        import base64 as b64
+        audio_b64 = b64.b64encode(audio_data).decode()
+
+        # Use Anthropic API with audio input
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Transcribe this audio recording exactly. Return only the transcribed text, nothing else."
+                    },
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": audio_file.content_type or "audio/webm",
+                            "data": audio_b64
+                        }
+                    }
+                ]
+            }]
+        )
+
+        transcript = response.content[0].text.strip()
+        r = jsonify({"transcript": transcript})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        # Fallback: return empty transcript
+        r = jsonify({"transcript": "", "error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
