@@ -1044,7 +1044,7 @@ Known people in the system: {', '.join(people_list)}
 
 Extract:
 1. title: Main action/task (concise, max 8 words)
-2. people: List of people mentioned (match to known people list where possible)
+2. people: List of ALL people mentioned by name — include every name even if not in the known list. Use the known list for spelling/matching only, never to filter out names.
 3. priority: "urgent" | "high" | "normal" (infer from words like urgent/asap/critical/important)
 4. due_date: ISO date YYYY-MM-DD (parse natural dates like "10th June", "next week", "tomorrow")
 5. subject: Main topic/project (e.g. "Autonomous ERP", "XRG", "Hiring", "Karachi Property")
@@ -1162,3 +1162,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
