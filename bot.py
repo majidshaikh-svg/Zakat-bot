@@ -1091,6 +1091,72 @@ priority_explicit: true only if user clearly stated urgent/high/medium/normal/cr
         return r, 500
 
 
+
+@flask_app.route("/api/pulse/search", methods=["POST","OPTIONS"])
+def api_pulse_search():
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        data = request.get_json(force=True)
+        query = data.get("query","").strip()
+        actions = data.get("actions", [])
+
+        if not query or not actions:
+            r = jsonify({"matched_ids": [], "explanation": "No query or actions provided"})
+            r.headers["Access-Control-Allow-Origin"] = "*"
+            return r, 200
+
+        actions_text = ""
+        for a in actions:
+            people = ", ".join([p.get("short_name") or p.get("name","") for p in (a.get("people") or [])])
+            actions_text += f"ID:{a['id']} | {a.get('title','')} | people:{people} | priority:{a.get('priority','')} | subject:{a.get('subject','')} | category:{a.get('category','')} | due:{a.get('due_date','')} | status:{a.get('status','')}\n"
+
+        prompt = f"""You are an intelligent action search engine. The user is searching their personal action/task list.
+
+User query: "{query}"
+
+Actions list:
+{actions_text}
+
+Return ONLY a JSON object with:
+1. "matched_ids": array of numeric IDs that match the user's query intent
+2. "explanation": one short sentence explaining what you found
+
+Match by intent, not just keywords. Examples:
+- "strategy" matches actions about strategy meetings, growth, planning
+- "Fahad urgent" matches urgent actions involving Fahad
+- "this week" matches actions due within 7 days
+- "follow up" matches actions that seem like follow-ups
+- "ADNOC" matches actions in the adnoc category or mentioning ADNOC
+
+Return ONLY valid JSON, no markdown, no explanation outside the JSON."""
+
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY",""))
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=512,
+            messages=[{"role":"user","content":prompt}]
+        )
+        raw = message.content[0].text.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        import json as _json
+        result = _json.loads(raw.strip())
+        r = jsonify(result)
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        logger.error(f"Pulse search error: {e}")
+        r = jsonify({"matched_ids": [], "explanation": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
 @flask_app.route("/api/transcribe", methods=["POST","OPTIONS"])
 def api_transcribe():
     if request.method == "OPTIONS":
@@ -1162,4 +1228,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
