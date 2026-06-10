@@ -1134,7 +1134,7 @@ Match by intent, not just keywords. Examples:
 
 Return ONLY valid JSON, no markdown, no explanation outside the JSON."""
 
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY",""))
+        # Use the global client already initialised with CLAUDE_API_KEY
         message = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=512,
@@ -1228,5 +1228,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
