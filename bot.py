@@ -857,8 +857,13 @@ def row_to_entry(row):
         drive_link=str(row[6]).strip() if len(row)>6 else ""; raw_msg=str(row[7]).strip() if len(row)>7 else ""
     else:
         txn_id=""; date=str(row[1]).strip(); amount=str(row[2]).strip()
-        cat=str(row[4]).strip() if len(row)>4 else ""; details=str(row[5]).strip() if len(row)>5 else ""
-        drive_link=""; raw_msg=""
+        # row[3] may contain description in some sheet formats
+        row3_text=str(row[3]).strip() if len(row)>3 else ""
+        cat=str(row[4]).strip() if len(row)>4 else ""; 
+        details_raw=str(row[5]).strip() if len(row)>5 else ""
+        # Combine row3 and row5 so keyword search catches both
+        details = ' '.join(filter(None,[row3_text, details_raw]))
+        drive_link=""; raw_msg=str(row[7]).strip() if len(row)>7 else ""
     if cat not in CATEGORIES: return None
     try: amt=float(str(amount).replace(",",""))
     except: amt=0
