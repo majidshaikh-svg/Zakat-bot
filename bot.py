@@ -857,13 +857,8 @@ def row_to_entry(row):
         drive_link=str(row[6]).strip() if len(row)>6 else ""; raw_msg=str(row[7]).strip() if len(row)>7 else ""
     else:
         txn_id=""; date=str(row[1]).strip(); amount=str(row[2]).strip()
-        # row[3] may contain description in some sheet formats
-        row3_text=str(row[3]).strip() if len(row)>3 else ""
-        cat=str(row[4]).strip() if len(row)>4 else ""; 
-        details_raw=str(row[5]).strip() if len(row)>5 else ""
-        # Combine row3 and row5 so keyword search catches both
-        details = ' '.join(filter(None,[row3_text, details_raw]))
-        drive_link=""; raw_msg=str(row[7]).strip() if len(row)>7 else ""
+        cat=str(row[4]).strip() if len(row)>4 else ""; details=str(row[5]).strip() if len(row)>5 else ""
+        drive_link=""; raw_msg=""
     if cat not in CATEGORIES: return None
     try: amt=float(str(amount).replace(",",""))
     except: amt=0
@@ -987,43 +982,17 @@ def api_search():
             if e:
                 all_txns.append(e)
 
-        # Cap at last 250 rows
-        all_txns = all_txns[-250:] if len(all_txns) > 250 else all_txns
-
         if not all_txns:
             r = jsonify({"answer": "No transactions found.", "transactions": []})
             r.headers["Access-Control-Allow-Origin"] = "*"
             return r, 200
 
-        # ── PYTHON PRE-FILTER ──
-        # Python finds keyword matches first — guarantees no missed rows
-        import re as _re
-        stop_words = {'the','and','for','last','entries','show','all','with','from',
-                      'above','below','total','given','through','entry','search','find'}
-        query_words = [w.lower() for w in _re.findall(r'[a-zA-Z0-9]+', query)
-                       if len(w) > 2 and w.lower() not in stop_words]
-
-        def row_text(t):
-            return ' '.join([
-                str(t.get('details','')),
-                str(t.get('raw_message','')),
-                str(t.get('category','')),
-                str(t.get('txn_id','')),
-            ]).lower()
-
-        # Split rows: Python-matched (★) vs others
-        starred = [t for t in all_txns if any(w in row_text(t) for w in query_words)]
-        others  = [t for t in all_txns if not any(w in row_text(t) for w in query_words)]
-        ordered = starred + others
-
-        # Format — ★ marks pre-matched rows so Claude knows to include them
+        # Format with index prefix for reliable matching
         txn_lines = []
-        for i, t in enumerate(ordered):
-            flag = "★" if i < len(starred) else " "
-            text = ' | '.join(filter(None,[t.get('details',''), t.get('raw_message','')]))
+        for i, t in enumerate(all_txns):
             txn_lines.append(
-                f"[{i}]{flag} {t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
-                f"{t.get('category','')} | {text}"
+                f"[{i}] {t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
+                f"{t.get('category','')} | {t.get('details','')}"
             )
 
         today_str = time.strftime("%d-%B-%Y")
@@ -1036,19 +1005,22 @@ Transactions (oldest to newest), each prefixed with [index]:
 
 User query: "{query}"
 
-RULES:
-- Rows marked ★ were pre-matched by Python — ALWAYS include ALL ★ rows in txn_indices
-- "last N" = return N most recent ★ rows; if no number given = return 15 most recent ★ rows
-- For amount queries: sum ALL ★ row amounts and state the total
-- txn_indices must be sorted most recent first (highest index first)
+Instructions:
+- Answer the query accurately
+- For "last N X entries" — return most recent N matching X category or name
+- For name queries — search DETAILS field
+- For amount queries — calculate and show totals
+- Format all dates as "15 May 2026" style
+- Keep answer to 1-2 sentences
 
 Return ONLY this JSON:
 {{
-  "answer": "1-2 sentence answer with total if relevant",
-  "txn_indices": [42, 38, 31, 25]
+  "answer": "concise answer here",
+  "txn_indices": [5, 3, 1]
 }}
 
-Return ONLY the JSON, no other text."""
+txn_indices: [index] numbers of matching rows, most recent first, max 15.
+Return ONLY the JSON."""
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -1066,7 +1038,7 @@ Return ONLY the JSON, no other text."""
         answer = result.get("answer", "")
         txn_indices = result.get("txn_indices", [])
 
-        matched_txns = [all_txns[i] for i in txn_indices if 0 <= i < len(all_txns)][:30]
+        matched_txns = [all_txns[i] for i in txn_indices if 0 <= i < len(all_txns)]
 
         # Clean dates
         import datetime
@@ -1899,71 +1871,6 @@ def api_cards_migrate():
             "errors":           errors[:10],
             "total_statements": len(statements)
         })
-        r.headers["Access-Control-Allow-Origin"] = "*"
-        return r, 200
-
-    except Exception as e:
-        r = jsonify({"error": str(e)})
-        r.headers["Access-Control-Allow-Origin"] = "*"
-        return r, 500
-
-
-
-@flask_app.route("/api/debug/sheet", methods=["GET"])
-def api_debug_sheet():
-    """
-    Debug endpoint — returns raw sheet rows for inspection.
-    Usage:
-      /api/debug/sheet                  → last 10 rows
-      /api/debug/sheet?keyword=biryani  → rows where any column contains keyword
-      /api/debug/sheet?rows=20          → last N rows
-    """
-    try:
-        keyword = request.args.get("keyword", "").lower().strip()
-        n       = int(request.args.get("rows", 10))
-
-        all_rows = get_rows()
-        data_rows = all_rows[1:]  # skip header
-
-        if keyword:
-            # Find rows where ANY column contains the keyword
-            matched = []
-            for i, row in enumerate(data_rows):
-                row_text = " | ".join(str(c) for c in row).lower()
-                if keyword in row_text:
-                    matched.append({
-                        "sheet_row": i + 2,  # +2 for header + 0-index
-                        "raw": row,
-                        "col_map": {
-                            f"col[{j}]": str(v) for j, v in enumerate(row)
-                        }
-                    })
-            result = matched[-n:] if len(matched) > n else matched
-            r = jsonify({
-                "keyword": keyword,
-                "total_matches": len(matched),
-                "showing": len(result),
-                "rows": result
-            })
-        else:
-            # Last N rows
-            last = data_rows[-n:] if len(data_rows) > n else data_rows
-            result = []
-            for i, row in enumerate(last):
-                sheet_row = len(data_rows) - len(last) + i + 2
-                result.append({
-                    "sheet_row": sheet_row,
-                    "raw": row,
-                    "col_map": {
-                        f"col[{j}]": str(v) for j, v in enumerate(row)
-                    }
-                })
-            r = jsonify({
-                "total_rows": len(data_rows),
-                "showing_last": n,
-                "rows": result
-            })
-
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 200
 
