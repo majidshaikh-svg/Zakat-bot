@@ -1749,6 +1749,153 @@ txn_indices = [index] numbers matching the query, max 15, most relevant first.""
 @flask_app.route("/api/cards/migrate", methods=["POST", "GET"])
 def api_cards_migrate():
     """
+    One-time migration from Google Sheets (via Node API) to Supabase.
+    Reads /api/statements and /api/transactions from the Node server.
+    """
+    try:
+        import urllib.request as ureq
+
+        NODE_BASE = "https://ams-finance-production.up.railway.app"
+
+        # ── Fetch statements ──
+        try:
+            req = ureq.Request(f"{NODE_BASE}/api/statements")
+            with ureq.urlopen(req, timeout=20) as resp:
+                statements = json.loads(resp.read().decode())
+        except Exception as e:
+            return jsonify({"error": f"Cannot fetch statements: {e}"}), 500
+
+        if not isinstance(statements, list):
+            return jsonify({"error": "Statements not a list", "data": str(statements)[:200]}), 500
+
+        # ── Fetch all transactions ──
+        try:
+            req = ureq.Request(f"{NODE_BASE}/api/transactions")
+            with ureq.urlopen(req, timeout=30) as resp:
+                all_txns = json.loads(resp.read().decode())
+        except Exception as e:
+            all_txns = []
+            logger.warning(f"Could not fetch transactions: {e}")
+
+        # Index transactions by statementId
+        txns_by_stmt = {}
+        for t in (all_txns if isinstance(all_txns, list) else []):
+            sid = t.get("statementId", "")
+            if sid not in txns_by_stmt:
+                txns_by_stmt[sid] = []
+            txns_by_stmt[sid].append(t)
+
+        migrated_stmts = 0
+        migrated_txns  = 0
+        errors         = []
+
+        upsert_headers = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+
+        for stmt in statements:
+            try:
+                bank         = stmt.get("bank", "")
+                stmt_id_node = stmt.get("statementId", "")
+                month        = stmt.get("statementMonth", "")
+                due_date     = stmt.get("paymentDueDate", "")
+                closing_bal  = float(stmt.get("closingBalance", 0) or 0)
+
+                # Derive last4 from bank
+                last4 = "7844" if "Mashreq" in bank else "6971" if "EIB" in bank else ""
+                card_name = "Solitaire" if "Mashreq" in bank else "Skywards" if "EIB" in bank else ""
+
+                if not bank or not month:
+                    errors.append(f"Skipped: missing bank/month — {stmt}")
+                    continue
+
+                stmt_data = {
+                    "bank":             bank,
+                    "last4":            last4,
+                    "card_name":        card_name,
+                    "statement_month":  month,
+                    "closing_balance":  closing_bal,
+                    "payment_due_date": due_date,
+                    "minimum_due":      0,
+                    "total_spend":      closing_bal,
+                    "total_credits":    0,
+                }
+
+                sr = requests.post(f"{SUPABASE_URL}/rest/v1/card_statements",
+                    headers=upsert_headers, json=stmt_data)
+
+                if not sr.ok:
+                    errors.append(f"Statement failed {bank} {month}: {sr.text[:100]}")
+                    continue
+
+                result  = sr.json()
+                sb_stmt_id = result[0]["id"] if isinstance(result, list) and result else None
+                migrated_stmts += 1
+
+                # Insert transactions for this statement
+                stmt_txns = txns_by_stmt.get(stmt_id_node, [])
+                txn_rows  = []
+
+                for t in stmt_txns:
+                    try:
+                        date_val = t.get("date", "")
+                        # Convert "15 May 2026" → "2026-05-15"
+                        if date_val:
+                            import datetime
+                            month_map = {"Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06",
+                                        "Jul":"07","Aug":"08","Sep":"09","Oct":"10","Nov":"11","Dec":"12"}
+                            parts = str(date_val).split(" ")
+                            if len(parts) == 3:
+                                date_val = f"{parts[2]}-{month_map.get(parts[1],'01')}-{parts[0].zfill(2)}"
+
+                        desc = t.get("description", "")
+                        amt  = float(t.get("amount", 0) or 0)
+                        cat  = t.get("category", "Others") or "Others"
+                        is_ey = "EY" in cat or "reimburse" in cat.lower()
+
+                        txn_rows.append({
+                            "statement_id":       sb_stmt_id,
+                            "bank":               t.get("bank", bank),
+                            "last4":              last4,
+                            "statement_month":    t.get("statementMonth", month),
+                            "date":               str(date_val)[:10] if date_val else None,
+                            "description":        desc,
+                            "amount":             amt,
+                            "category":           cat,
+                            "is_ey_reimbursable": is_ey,
+                        })
+                    except Exception as te:
+                        errors.append(f"Txn error: {te}")
+
+                if txn_rows:
+                    tr = requests.post(f"{SUPABASE_URL}/rest/v1/card_transactions",
+                        headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                        json=txn_rows)
+                    if tr.ok:
+                        migrated_txns += len(txn_rows)
+                    else:
+                        errors.append(f"Txns failed {bank} {month}: {tr.text[:100]}")
+
+            except Exception as se:
+                errors.append(f"Statement error: {se}")
+
+        r = jsonify({
+            "status":           "migration_complete",
+            "statements":       migrated_stmts,
+            "transactions":     migrated_txns,
+            "errors":           errors[:10],
+            "total_statements": len(statements),
+            "total_txns_found": len(all_txns) if isinstance(all_txns, list) else 0,
+        })
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+@flask_app.route("/api/cards/migrate_OLD", methods=["POST", "GET"])
+def api_cards_migrate_old():
+    """
     One-time migration: reads existing statements from Node API
     and writes them to Supabase card_statements + card_transactions.
     Call once via: GET /api/cards/migrate
