@@ -983,7 +983,7 @@ def api_search():
                 all_txns.append(e)
 
         # Cap at last 250 rows
-        all_txns = all_txns[-250:] if len(all_txns) > 250 else all_txns
+        all_txns = all_txns[-1500:] if len(all_txns) > 1500 else all_txns
 
         if not all_txns:
             r = jsonify({"answer": "No transactions found.", "transactions": []})
