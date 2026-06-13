@@ -988,19 +988,42 @@ def api_search():
                 all_txns.append(e)
 
         # Cap at last 250 rows
-        all_txns = all_txns[-1500:] if len(all_txns) > 1500 else all_txns
+        all_txns = all_txns[-250:] if len(all_txns) > 250 else all_txns
 
         if not all_txns:
             r = jsonify({"answer": "No transactions found.", "transactions": []})
             r.headers["Access-Control-Allow-Origin"] = "*"
             return r, 200
 
-        # Format with index prefix for reliable matching
+        # ── PYTHON PRE-FILTER ──
+        # Python finds keyword matches first — guarantees no missed rows
+        import re as _re
+        stop_words = {'the','and','for','last','entries','show','all','with','from',
+                      'above','below','total','given','through','entry','search','find'}
+        query_words = [w.lower() for w in _re.findall(r'[a-zA-Z0-9]+', query)
+                       if len(w) > 2 and w.lower() not in stop_words]
+
+        def row_text(t):
+            return ' '.join([
+                str(t.get('details','')),
+                str(t.get('raw_message','')),
+                str(t.get('category','')),
+                str(t.get('txn_id','')),
+            ]).lower()
+
+        # Split rows: Python-matched (★) vs others
+        starred = [t for t in all_txns if any(w in row_text(t) for w in query_words)]
+        others  = [t for t in all_txns if not any(w in row_text(t) for w in query_words)]
+        ordered = starred + others
+
+        # Format — ★ marks pre-matched rows so Claude knows to include them
         txn_lines = []
-        for i, t in enumerate(all_txns):
+        for i, t in enumerate(ordered):
+            flag = "★" if i < len(starred) else " "
+            text = ' | '.join(filter(None,[t.get('details',''), t.get('raw_message','')]))
             txn_lines.append(
-                f"[{i}] {t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
-                f"{t.get('category','')} | {t.get('details','')}"
+                f"[{i}]{flag} {t.get('txn_id','')} | {t.get('date','')} | PKR {t.get('amount',0)} | "
+                f"{t.get('category','')} | {text}"
             )
 
         today_str = time.strftime("%d-%B-%Y")
@@ -1013,23 +1036,18 @@ Transactions (oldest to newest), each prefixed with [index]:
 
 User query: "{query}"
 
-SEARCH RULES:
-- Search ALL fields: date, amount, category, AND details
-- Text matching: case-insensitive, partial match allowed (e.g. "biryani" matches "Biryani Dubai", "biryani walay", "Buryani")
-- Spelling variants: match common misspellings (biryani/buryani/bryani all match each other)
-- "last N entries" means the N most recent matching rows by index (highest index = most recent)
-- For amount queries: sum all matching amounts and state the total
-- Never limit results unless the user specifies a number — return ALL matches
-- If user specifies a number ("last 20", "last 10") return exactly that many
-- If no number mentioned, return the 15 most recent matches
+RULES:
+- Rows marked ★ were pre-matched by Python — ALWAYS include ALL ★ rows in txn_indices
+- "last N" = return N most recent ★ rows; if no number given = return 15 most recent ★ rows
+- For amount queries: sum ALL ★ row amounts and state the total
+- txn_indices must be sorted most recent first (highest index first)
 
 Return ONLY this JSON:
 {{
-  "answer": "1-2 sentence answer with total amount if relevant",
+  "answer": "1-2 sentence answer with total if relevant",
   "txn_indices": [42, 38, 31, 25]
 }}
 
-txn_indices: matching row indices, most recent first. Match the number the user requested.
 Return ONLY the JSON, no other text."""
 
         response = client.messages.create(
