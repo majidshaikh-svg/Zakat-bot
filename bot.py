@@ -1070,10 +1070,17 @@ def api_pulse_extract():
     try:
         data = request.get_json()
         text = data.get("text", "").strip()
-        people_list = data.get("people", [])  # existing people from Supabase
+        people_raw = data.get("people", [])  # list of {id, name, short_name}
 
         if not text:
             return jsonify({"error": "No text provided"}), 400
+
+        # Build people reference string with both full and short names
+        if people_raw and isinstance(people_raw[0], dict):
+            people_lines = [f"  - {p.get('short_name','')} (full name: {p.get('name','')})" for p in people_raw]
+            people_str = chr(10).join(people_lines)
+        else:
+            people_str = ', '.join(str(p) for p in people_raw)
 
         today = time.strftime("%d %B %Y")
 
@@ -1081,16 +1088,23 @@ def api_pulse_extract():
 
 Text: "{text}"
 
-Known people in the system: {', '.join(people_list)}
+Known people in the system (short name → full name):
+{people_str}
 
 Extract:
 1. title: Main action/task (concise, max 8 words)
-2. people: List of ALL people mentioned by name — include every name even if not in the known list. Use the known list for spelling/matching only, never to filter out names.
+2. people: List of short names of people mentioned — use the EXACT short_name from the known list above.
+   FUZZY MATCHING RULES — always resolve to the closest known person:
+   - Match by short name OR full name OR partial name
+   - Typos/misspellings: "Nikesh" → "Nilesh", "Fahd" → "Fahad", "Mehtab" → "Mehtab"
+   - Partial names: "Guru" → "Guru", "Mobin" → "Mobin"
+   - If mentioned name closely resembles a known person, use that person's short_name
+   - Only add as new (unknown) person if no known person is a reasonable match
 3. priority: "urgent" | "high" | "normal" (infer from words like urgent/asap/critical/important)
 4. due_date: ISO date YYYY-MM-DD (parse natural dates like "10th June", "next week", "tomorrow")
 5. subject: Main topic/project (e.g. "Autonomous ERP", "XRG", "Hiring", "Karachi Property")
 6. category: "adnoc" | "eyai" | "personal"
-   - adnoc: if mentions ADNOC people (Mobin, Fahad, Omar, Mehtab, George, Alharith) or ADNOC projects
+   - adnoc: if mentions ADNOC people (Mobin, Fahad, Omar, Mehtab) or ADNOC projects
    - eyai: if mentions EY AI, AI Hub, EY projects
    - personal: family, property, zakat, personal matters
 7. detail: Any additional context from the text
