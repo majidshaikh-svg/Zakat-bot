@@ -1005,22 +1005,23 @@ Transactions (oldest to newest), each prefixed with [index]:
 
 User query: "{query}"
 
-Instructions:
-- Answer the query accurately
-- For "last N X entries" — return most recent N matching X category or name
-- For name queries — search DETAILS field
-- For amount queries — calculate and show totals
-- Format all dates as "15 May 2026" style
-- Keep answer to 1-2 sentences
+SEARCH RULES:
+- Search ALL fields: date, amount, category, AND details
+- Text matching: case-insensitive, partial match allowed (e.g. "biryani" matches "Biryani Dubai", "biryani walay", "Buryani")
+- Spelling variants: match common misspellings (biryani/buryani/bryani all match each other)
+- "last N entries" means the N most recent matching rows by index (highest index = most recent)
+- For amount queries: sum all matching amounts and state the total
+- Never limit results unless the user specifies a number — return ALL matches
+- If user says "last 20" return up to 20, if user says "last 10" return up to 10, if no number return all matches up to 30
 
 Return ONLY this JSON:
 {{
-  "answer": "concise answer here",
-  "txn_indices": [5, 3, 1]
+  "answer": "1-2 sentence answer with total amount if relevant",
+  "txn_indices": [42, 38, 31, 25]
 }}
 
-txn_indices: [index] numbers of matching rows, most recent first, max 15.
-Return ONLY the JSON."""
+txn_indices: matching row indices, most recent first. Match the number the user requested.
+Return ONLY the JSON, no other text."""
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -1038,7 +1039,7 @@ Return ONLY the JSON."""
         answer = result.get("answer", "")
         txn_indices = result.get("txn_indices", [])
 
-        matched_txns = [all_txns[i] for i in txn_indices if 0 <= i < len(all_txns)]
+        matched_txns = [all_txns[i] for i in txn_indices if 0 <= i < len(all_txns)][:30]
 
         # Clean dates
         import datetime
