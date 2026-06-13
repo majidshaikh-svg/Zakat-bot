@@ -1844,6 +1844,141 @@ txn_indices = [index] numbers matching the query, max 15, most relevant first.""
         return r, 500
 
 
+
+@flask_app.route("/api/cards/migrate", methods=["POST", "GET"])
+def api_cards_migrate():
+    """
+    One-time migration: reads existing statements from Node API
+    and writes them to Supabase card_statements + card_transactions.
+    Call once via: GET /api/cards/migrate
+    """
+    try:
+        import urllib.request as ureq
+
+        NODE_BASE = "http://localhost:3001"  # Node API running alongside
+
+        # Try to read existing statements from Node server
+        try:
+            with ureq.urlopen(f"{NODE_BASE}/api/statements", timeout=10) as resp:
+                statements = json.loads(resp.read().decode())
+        except Exception as e:
+            # Try the Railway app URL as fallback
+            try:
+                req = ureq.Request("https://ams-finance-production.up.railway.app/api/statements")
+                with ureq.urlopen(req, timeout=15) as resp:
+                    statements = json.loads(resp.read().decode())
+            except Exception as e2:
+                return jsonify({"error": f"Cannot reach statements API: {e} / {e2}"}), 500
+
+        if not isinstance(statements, list):
+            return jsonify({"error": "Statements not a list", "data": str(statements)[:200]}), 500
+
+        migrated_stmts = 0
+        migrated_txns  = 0
+        errors         = []
+
+        for stmt in statements:
+            try:
+                bank  = stmt.get("bank", "")
+                last4 = stmt.get("last4", "") or stmt.get("cardLast4", "")
+                month = stmt.get("statementMonth", "") or stmt.get("statement_month", "")
+
+                if not bank or not month:
+                    errors.append(f"Skipped: missing bank/month in {stmt}")
+                    continue
+
+                stmt_data = {
+                    "bank":              bank,
+                    "last4":             last4,
+                    "card_name":         stmt.get("cardName", "") or stmt.get("card_name", ""),
+                    "statement_month":   month,
+                    "closing_balance":   float(stmt.get("closingBalance", 0) or stmt.get("closing_balance", 0) or 0),
+                    "payment_due_date":  stmt.get("paymentDueDate", "") or stmt.get("payment_due_date", ""),
+                    "minimum_due":       float(stmt.get("minimumDue", 0) or stmt.get("minimum_due", 0) or 0),
+                    "total_spend":       float(stmt.get("totalSpend", 0) or stmt.get("total_spend", 0) or 0),
+                    "total_credits":     float(stmt.get("totalCredits", 0) or stmt.get("total_credits", 0) or 0),
+                }
+
+                # Upsert statement
+                upsert_headers = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+                sr = requests.post(f"{SUPABASE_URL}/rest/v1/card_statements",
+                    headers=upsert_headers, json=stmt_data)
+
+                if not sr.ok:
+                    errors.append(f"Statement upsert failed {bank} {month}: {sr.text[:100]}")
+                    continue
+
+                stmt_result = sr.json()
+                stmt_id = stmt_result[0]["id"] if isinstance(stmt_result, list) and stmt_result else None
+                migrated_stmts += 1
+
+                # Get transactions for this statement
+                transactions = stmt.get("transactions", [])
+                if not transactions:
+                    # Try fetching from transactions endpoint
+                    try:
+                        tx_url = f"https://ams-finance-production.up.railway.app/api/transactions?month={month}&bank={bank}"
+                        req = ureq.Request(tx_url)
+                        with ureq.urlopen(req, timeout=15) as resp:
+                            tx_data = json.loads(resp.read().decode())
+                            transactions = tx_data if isinstance(tx_data, list) else tx_data.get("transactions", [])
+                    except:
+                        transactions = []
+
+                txn_rows = []
+                for t in transactions:
+                    try:
+                        date_val = t.get("date", "") or t.get("txnDate", "")
+                        # Normalise date to YYYY-MM-DD
+                        if date_val and "/" in str(date_val):
+                            parts = str(date_val).split("/")
+                            if len(parts) == 3:
+                                date_val = f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+
+                        amount = float(str(t.get("amount", 0) or t.get("debit", 0) or 0).replace(",",""))
+
+                        txn_rows.append({
+                            "statement_id":       stmt_id,
+                            "bank":               bank,
+                            "last4":              last4,
+                            "statement_month":    month,
+                            "date":               str(date_val)[:10] if date_val else None,
+                            "description":        str(t.get("description", t.get("narration", t.get("details", "")))),
+                            "amount":             amount,
+                            "category":           t.get("category", "Others") or "Others",
+                            "is_ey_reimbursable": bool(t.get("isEyReimbursable", t.get("is_ey_reimbursable", False))),
+                        })
+                    except Exception as te:
+                        errors.append(f"Txn parse error: {te}")
+
+                if txn_rows:
+                    tr = requests.post(f"{SUPABASE_URL}/rest/v1/card_transactions",
+                        headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                        json=txn_rows)
+                    if tr.ok:
+                        migrated_txns += len(txn_rows)
+                    else:
+                        errors.append(f"Txns insert failed {bank} {month}: {tr.text[:100]}")
+
+            except Exception as se:
+                errors.append(f"Statement error: {se}")
+
+        r = jsonify({
+            "status":           "migration_complete",
+            "statements":       migrated_stmts,
+            "transactions":     migrated_txns,
+            "errors":           errors[:10],
+            "total_statements": len(statements)
+        })
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
