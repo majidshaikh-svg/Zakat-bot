@@ -1397,10 +1397,25 @@ def sb_patch(table, match, data):
 
 @flask_app.route("/api/cards/statements", methods=["GET"])
 def api_cards_statements():
-    """Return all statements, latest first."""
+    """Return all statements, latest first — camelCase for React app."""
     try:
         stmts = sb_get("card_statements", "order=created_at.desc")
-        r = jsonify(stmts if isinstance(stmts, list) else [])
+        if not isinstance(stmts, list):
+            stmts = []
+        # Map snake_case → camelCase to match existing React field names
+        mapped = [{
+            "id":              s.get("id"),
+            "bank":            s.get("bank"),
+            "last4":           s.get("last4"),
+            "cardName":        s.get("card_name"),
+            "statementMonth":  s.get("statement_month"),
+            "closingBalance":  float(s.get("closing_balance") or 0),
+            "paymentDueDate":  s.get("payment_due_date"),
+            "minimumDue":      float(s.get("minimum_due") or 0),
+            "totalSpend":      float(s.get("total_spend") or 0),
+            "totalCredits":    float(s.get("total_credits") or 0),
+        } for s in stmts]
+        r = jsonify(mapped)
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 200
     except Exception as e:
@@ -1410,22 +1425,37 @@ def api_cards_statements():
 
 @flask_app.route("/api/cards/transactions", methods=["GET"])
 def api_cards_transactions():
-    """Return transactions with optional filters."""
+    """Return transactions with optional filters — camelCase for React app."""
     try:
         month    = request.args.get("month", "")
         bank     = request.args.get("bank", "")
         category = request.args.get("category", "")
-        limit    = request.args.get("limit", "100")
+        limit    = request.args.get("limit", "200")
         ey_only  = request.args.get("ey_only", "false")
 
-        params = [f"order=date.desc", f"limit={limit}"]
+        params = ["order=date.desc", f"limit={limit}"]
         if month:    params.append(f"statement_month=eq.{month}")
         if bank:     params.append(f"bank=eq.{bank}")
         if category: params.append(f"category=eq.{category}")
         if ey_only == "true": params.append("is_ey_reimbursable=eq.true")
 
         txns = sb_get("card_transactions", "&".join(params))
-        r = jsonify(txns if isinstance(txns, list) else [])
+        if not isinstance(txns, list):
+            txns = []
+        # Map snake_case → camelCase to match existing React field names
+        mapped = [{
+            "id":              t.get("id"),
+            "statementId":     t.get("statement_id"),
+            "bank":            t.get("bank"),
+            "card":            t.get("last4"),
+            "statementMonth":  t.get("statement_month"),
+            "date":            t.get("date"),
+            "description":     t.get("description"),
+            "amount":          float(t.get("amount") or 0),
+            "category":        t.get("category", "Others"),
+            "isEyReimbursable":t.get("is_ey_reimbursable", False),
+        } for t in txns]
+        r = jsonify(mapped)
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 200
     except Exception as e:
