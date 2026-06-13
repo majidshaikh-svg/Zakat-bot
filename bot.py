@@ -1466,6 +1466,384 @@ def insights_status():
     return r, 200
 
 
+# ══════════════════════════════════════════════════════
+# SUPABASE CONFIG — for Cards module
+# ══════════════════════════════════════════════════════
+SUPABASE_URL     = "https://flpzqovnyrlgnahnlimh.supabase.co"
+SUPABASE_SERVICE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZscHpxb3ZueXJsZ25haG5saW1oIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MDU3NDAyNSwiZXhwIjoyMDk2MTUwMDI1fQ.00GDlzw34xVLn9tMaHye4SjNlt3mltfXLT0XdUHyMM8"
+SB_HEADERS = {
+    "apikey": SUPABASE_SERVICE,
+    "Authorization": f"Bearer {SUPABASE_SERVICE}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
+
+def sb_get(table, params=""):
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?{params}", headers=SB_HEADERS)
+    return r.json() if r.ok else []
+
+def sb_post(table, data):
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS, json=data)
+    return r.json() if r.ok else None
+
+def sb_patch(table, match, data):
+    r = requests.patch(f"{SUPABASE_URL}/rest/v1/{table}?{match}", headers=SB_HEADERS, json=data)
+    return r.ok
+
+# ══════════════════════════════════════════════════════
+# CARDS API — Supabase-backed
+# ══════════════════════════════════════════════════════
+
+@flask_app.route("/api/cards/statements", methods=["GET"])
+def api_cards_statements():
+    """Return all statements, latest first."""
+    try:
+        stmts = sb_get("card_statements", "order=created_at.desc")
+        r = jsonify(stmts if isinstance(stmts, list) else [])
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+@flask_app.route("/api/cards/transactions", methods=["GET"])
+def api_cards_transactions():
+    """Return transactions with optional filters."""
+    try:
+        month    = request.args.get("month", "")
+        bank     = request.args.get("bank", "")
+        category = request.args.get("category", "")
+        limit    = request.args.get("limit", "100")
+        ey_only  = request.args.get("ey_only", "false")
+
+        params = [f"order=date.desc", f"limit={limit}"]
+        if month:    params.append(f"statement_month=eq.{month}")
+        if bank:     params.append(f"bank=eq.{bank}")
+        if category: params.append(f"category=eq.{category}")
+        if ey_only == "true": params.append("is_ey_reimbursable=eq.true")
+
+        txns = sb_get("card_transactions", "&".join(params))
+        r = jsonify(txns if isinstance(txns, list) else [])
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+@flask_app.route("/api/cards/upload", methods=["POST", "OPTIONS"])
+def api_cards_upload():
+    """
+    Receive parsed statement data from the app after PDF processing.
+    Saves statement + transactions to Supabase.
+    Trigger then fires AI analysis automatically.
+    """
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        data          = request.get_json()
+        bank          = data.get("bank", "")
+        last4         = data.get("last4", "")
+        card_name     = data.get("card_name", "")
+        month         = data.get("statement_month", "")
+        closing_bal   = data.get("closing_balance", 0)
+        due_date      = data.get("payment_due_date", "")
+        min_due       = data.get("minimum_due", 0)
+        total_spend   = data.get("total_spend", 0)
+        total_credits = data.get("total_credits", 0)
+        transactions  = data.get("transactions", [])
+
+        # Upsert statement
+        stmt_data = {
+            "bank": bank, "last4": last4, "card_name": card_name,
+            "statement_month": month, "closing_balance": closing_bal,
+            "payment_due_date": due_date, "minimum_due": min_due,
+            "total_spend": total_spend, "total_credits": total_credits
+        }
+        # Use upsert
+        headers_upsert = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+        sr = requests.post(f"{SUPABASE_URL}/rest/v1/card_statements",
+            headers=headers_upsert, json=stmt_data)
+        if not sr.ok:
+            return jsonify({"error": f"Statement save failed: {sr.text}"}), 500
+
+        stmt_list = sr.json()
+        stmt_id   = stmt_list[0]["id"] if isinstance(stmt_list, list) and stmt_list else None
+
+        # Insert transactions in batch
+        txn_rows = []
+        for t in transactions:
+            txn_rows.append({
+                "statement_id":       stmt_id,
+                "bank":               bank,
+                "last4":              last4,
+                "statement_month":    month,
+                "date":               t.get("date"),
+                "description":        t.get("description", ""),
+                "amount":             t.get("amount", 0),
+                "category":           t.get("category", "Others"),
+                "is_ey_reimbursable": t.get("is_ey_reimbursable", False),
+            })
+
+        if txn_rows:
+            tr = requests.post(f"{SUPABASE_URL}/rest/v1/card_transactions",
+                headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                json=txn_rows)
+            if not tr.ok:
+                logger.error(f"Transactions save error: {tr.text}")
+
+        r = jsonify({
+            "success": True,
+            "statement_id": stmt_id,
+            "transactions_saved": len(txn_rows),
+            "message": "Statement saved. AI analysis triggered automatically."
+        })
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
+@flask_app.route("/api/cards/analyse", methods=["POST", "OPTIONS"])
+def api_cards_analyse():
+    """
+    Called automatically by Supabase trigger when a statement is uploaded.
+    Runs Claude AI analysis and creates Pulse actions for:
+    - Payment due alerts
+    - EY reimbursable tracking
+    - Spend spikes
+    - Unusual transactions
+    """
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        data         = request.get_json(silent=True) or {}
+        statement_id = data.get("statement_id")
+        bank         = data.get("bank", "")
+        month        = data.get("month", "")
+
+        if not statement_id:
+            return jsonify({"error": "No statement_id"}), 400
+
+        logger.info(f"Cards AI analysis triggered — {bank} {month}")
+
+        # Fetch statement
+        stmts = sb_get("card_statements", f"id=eq.{statement_id}")
+        if not stmts:
+            return jsonify({"error": "Statement not found"}), 404
+        stmt = stmts[0]
+
+        # Fetch transactions for this statement
+        txns = sb_get("card_transactions",
+            f"statement_id=eq.{statement_id}&order=amount.desc")
+
+        # Fetch previous month for comparison
+        prev_txns = sb_get("card_transactions",
+            f"bank=eq.{bank}&order=date.desc&limit=200")
+
+        # Format for Claude
+        today_str = time.strftime("%d %B %Y")
+        txn_summary = []
+        for t in txns[:50]:
+            ey = " [EY]" if t.get("is_ey_reimbursable") else ""
+            txn_summary.append(
+                f"{t['date']} | {t['description'][:40]} | AED {t['amount']:.0f} | {t['category']}{ey}"
+            )
+
+        # Category totals
+        cat_totals = {}
+        for t in txns:
+            if t["amount"] > 0:
+                cat = t.get("category", "Others")
+                cat_totals[cat] = cat_totals.get(cat, 0) + t["amount"]
+
+        ey_total = sum(t["amount"] for t in txns if t.get("is_ey_reimbursable"))
+        ey_count = sum(1 for t in txns if t.get("is_ey_reimbursable"))
+
+        prompt = f"""You are a financial AI for Majid's Al Khalique app.
+Today: {today_str}
+
+Statement: {bank} ({stmt.get("last4","")}) — {month}
+Closing Balance: AED {stmt.get("closing_balance",0):.0f}
+Payment Due: {stmt.get("payment_due_date","N/A")}
+Total Spend: AED {stmt.get("total_spend",0):.0f}
+
+Category breakdown:
+{chr(10).join(f"  {k}: AED {v:.0f}" for k,v in sorted(cat_totals.items(), key=lambda x:-x[1]))}
+
+EY Reimbursable: AED {ey_total:.0f} across {ey_count} transactions
+
+Top transactions:
+{chr(10).join(txn_summary[:20])}
+
+Generate Pulse ACTIONS for Majid. Each action should be something he needs to DO.
+
+Rules:
+- Payment due within 7 days → urgent action
+- Payment due 8-14 days → high priority action
+- EY reimbursable > AED 5,000 → high priority action to submit claim
+- Any single transaction > AED 10,000 → action to verify/note
+- Spend spike > 20% in any category vs typical → amber action
+
+Return ONLY a JSON array of actions to create in Pulse:
+[
+  {{
+    "title": "Pay Mashreq Solitaire AED 94.8K",
+    "detail": "Payment due 4 Jun 2026. Closing balance AED 94,800. Avoid late fees.",
+    "priority": "urgent",
+    "category": "personal",
+    "due_date": "2026-06-04",
+    "action_type": "payment_due",
+    "amount": 94800
+  }}
+]
+
+Only include actions that are genuinely actionable. Max 5 actions. Empty array [] if nothing urgent."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        actions_to_create = json.loads(raw.strip())
+
+        created = []
+        for action in actions_to_create:
+            # Create in Pulse actions table
+            pulse_action = {
+                "title":    action.get("title", ""),
+                "detail":   action.get("detail", ""),
+                "priority": action.get("priority", "high"),
+                "category": action.get("category", "personal"),
+                "due_date": action.get("due_date"),
+                "status":   "open",
+                "source":   "cards_ai",
+                "subject":  f"Cards — {bank} {month}"
+            }
+            result = sb_post("actions", pulse_action)
+            if result and isinstance(result, list) and result[0].get("id"):
+                action_id = result[0]["id"]
+                # Log in card_ai_actions
+                sb_post("card_ai_actions", {
+                    "statement_id": statement_id,
+                    "action_id":    action_id,
+                    "action_type":  action.get("action_type", "general"),
+                    "title":        action.get("title", ""),
+                    "detail":       action.get("detail", ""),
+                    "amount":       action.get("amount")
+                })
+                created.append(action_id)
+
+        logger.info(f"Cards AI: {len(created)} Pulse actions created for {bank} {month}")
+
+        # Update insight cache
+        with _cache_lock:
+            _insight_cache["cards"]["insights"] = []
+            _insight_cache["cards"]["generated"] = None
+
+        r = jsonify({
+            "status":          "analysed",
+            "actions_created": len(created),
+            "bank":            bank,
+            "month":           month
+        })
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        logger.error(f"Cards analyse error: {e}")
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
+@flask_app.route("/api/cards/search", methods=["POST", "OPTIONS"])
+def api_cards_search():
+    """AI search over card transactions in Supabase."""
+    if request.method == "OPTIONS":
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "*"
+        return r, 200
+    try:
+        data  = request.get_json()
+        query = data.get("query", "").strip()
+        month = data.get("month", "")
+        bank  = data.get("bank", "")
+
+        if not query:
+            return jsonify({"error": "No query"}), 400
+
+        # Fetch relevant transactions
+        params = ["order=date.desc", "limit=200"]
+        if month: params.append(f"statement_month=eq.{month}")
+        if bank:  params.append(f"bank=eq.{bank}")
+        txns = sb_get("card_transactions", "&".join(params))
+
+        if not txns:
+            r = jsonify({"answer": "No transactions found.", "transactions": []})
+            r.headers["Access-Control-Allow-Origin"] = "*"
+            return r, 200
+
+        txn_lines = [
+            f"[{i}] {t['date']} | {t['description']} | AED {t['amount']:.0f} | {t['category']} | {t['bank']} {t['last4']}"
+            for i, t in enumerate(txns)
+        ]
+
+        prompt = f"""You are a card transaction search assistant for Majid.
+Today: {time.strftime("%d %B %Y")}
+
+Transactions (newest first):
+{chr(10).join(txn_lines[:100])}
+
+Query: "{query}"
+
+Return ONLY JSON:
+{{
+  "answer": "1-2 sentence answer",
+  "txn_indices": [0, 3, 7]
+}}
+
+txn_indices = [index] numbers matching the query, max 15, most relevant first."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"): raw = raw[4:]
+        result       = json.loads(raw.strip())
+        answer       = result.get("answer", "")
+        txn_indices  = result.get("txn_indices", [])
+        matched_txns = [txns[i] for i in txn_indices if 0 <= i < len(txns)]
+
+        r = jsonify({"answer": answer, "transactions": matched_txns})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e), "answer": "Search failed.", "transactions": []})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
