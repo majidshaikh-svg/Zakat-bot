@@ -1012,7 +1012,8 @@ SEARCH RULES:
 - "last N entries" means the N most recent matching rows by index (highest index = most recent)
 - For amount queries: sum all matching amounts and state the total
 - Never limit results unless the user specifies a number — return ALL matches
-- If user says "last 20" return up to 20, if user says "last 10" return up to 10, if no number return all matches up to 30
+- If user specifies a number ("last 20", "last 10") return exactly that many
+- If no number mentioned, return the 15 most recent matches
 
 Return ONLY this JSON:
 {{
