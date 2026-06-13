@@ -245,7 +245,7 @@ Return ONLY a JSON array:
 ]"""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -469,7 +469,7 @@ Rules:
 - Details should be clean human-readable description. Do NOT repeat the amount or category.
 Recent entries:
 {recent}"""
-    r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1000, system=system, messages=[{"role":"user","content":content}])
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000, system=system, messages=[{"role":"user","content":content}])
     raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
     result = json.loads(raw)
     if isinstance(result, dict): result = [result]
@@ -791,7 +791,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with tempfile.NamedTemporaryFile(suffix=".ogg") as tmp:
             await file.download_to_drive(tmp.name)
             with open(tmp.name,"rb") as f: audio_b64 = base64.b64encode(f.read()).decode()
-        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=300,
+        r = client.messages.create(model="claude-sonnet-4-6", max_tokens=300,
             system="Transcribe exactly. Return only transcription.",
             messages=[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"audio/ogg","data":audio_b64}},{"type":"text","text":"Transcribe."}]}])
         transcript = r.content[0].text.strip()
@@ -1023,7 +1023,7 @@ txn_indices: [index] numbers of matching rows, most recent first, max 15.
 Return ONLY the JSON."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -1110,7 +1110,7 @@ Return ONLY JSON:
 priority_explicit: true only if user clearly stated urgent/high/medium/normal/critical/asap. false if you inferred it."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -1177,7 +1177,7 @@ Return ONLY valid JSON, no markdown, no explanation outside the JSON."""
 
         # Use the global client already initialised with CLAUDE_API_KEY
         message = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=512,
             messages=[{"role":"user","content":prompt}]
         )
@@ -1218,7 +1218,7 @@ def api_transcribe():
 
         # Use Anthropic API with audio input
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{
                 "role": "user",
@@ -1612,7 +1612,7 @@ Return ONLY a JSON array of actions to create in Pulse:
 Only include actions that are genuinely actionable. Max 5 actions. Empty array [] if nothing urgent."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -1722,7 +1722,7 @@ Return ONLY JSON:
 txn_indices = [index] numbers matching the query, max 15, most relevant first."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             messages=[{"role": "user", "content": prompt}]
         )
