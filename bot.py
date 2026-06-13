@@ -1890,6 +1890,71 @@ def api_cards_migrate():
         return r, 500
 
 
+
+@flask_app.route("/api/debug/sheet", methods=["GET"])
+def api_debug_sheet():
+    """
+    Debug endpoint — returns raw sheet rows for inspection.
+    Usage:
+      /api/debug/sheet                  → last 10 rows
+      /api/debug/sheet?keyword=biryani  → rows where any column contains keyword
+      /api/debug/sheet?rows=20          → last N rows
+    """
+    try:
+        keyword = request.args.get("keyword", "").lower().strip()
+        n       = int(request.args.get("rows", 10))
+
+        all_rows = get_rows()
+        data_rows = all_rows[1:]  # skip header
+
+        if keyword:
+            # Find rows where ANY column contains the keyword
+            matched = []
+            for i, row in enumerate(data_rows):
+                row_text = " | ".join(str(c) for c in row).lower()
+                if keyword in row_text:
+                    matched.append({
+                        "sheet_row": i + 2,  # +2 for header + 0-index
+                        "raw": row,
+                        "col_map": {
+                            f"col[{j}]": str(v) for j, v in enumerate(row)
+                        }
+                    })
+            result = matched[-n:] if len(matched) > n else matched
+            r = jsonify({
+                "keyword": keyword,
+                "total_matches": len(matched),
+                "showing": len(result),
+                "rows": result
+            })
+        else:
+            # Last N rows
+            last = data_rows[-n:] if len(data_rows) > n else data_rows
+            result = []
+            for i, row in enumerate(last):
+                sheet_row = len(data_rows) - len(last) + i + 2
+                result.append({
+                    "sheet_row": sheet_row,
+                    "raw": row,
+                    "col_map": {
+                        f"col[{j}]": str(v) for j, v in enumerate(row)
+                    }
+                })
+            r = jsonify({
+                "total_rows": len(data_rows),
+                "showing_last": n,
+                "rows": result
+            })
+
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
