@@ -1,4 +1,5 @@
 import os, json, logging, tempfile, base64, urllib.request, time, re, io, threading
+import requests
 try:
     from PIL import Image
     PIL_AVAILABLE = True
