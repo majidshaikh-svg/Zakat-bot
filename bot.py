@@ -941,120 +941,20 @@ def api_charity_insights():
         r.headers["Access-Control-Allow-Headers"] = "*"
         return r, 200
     try:
-        # Return cache if available — only regenerate if cache is empty
+        # Return cache if available
         with _cache_lock:
             cached = _insight_cache["charity"]
             if cached["insights"] and cached["generated"]:
                 r = jsonify({
-                    "insights": cached["insights"],
+                    "insights":  cached["insights"],
                     "generated": cached["generated"],
-                    "cached": True
+                    "cached":    True
                 })
                 r.headers["Access-Control-Allow-Origin"] = "*"
                 return r, 200
-
-        # Cache empty — generate now (first load only)
+        # Cache empty — generate now
         insights = _generate_charity_insights()
         r = jsonify({"insights": insights, "generated": time.strftime("%Y-%m-%d %H:%M"), "cached": False})
-        r.headers["Access-Control-Allow-Origin"] = "*"
-        return r, 200
-    except Exception as e:
-        # Fallback: try to generate fresh
-        try:
-        rows = get_rows()
-        data_rows = []
-        for row in rows[1:]:
-            if len(row) < 5: continue
-            if str(row[0]).startswith("TXN-"):
-                date=str(row[1]).strip(); amount=str(row[2]).strip()
-                head=str(row[3]).strip(); cat=str(row[4]).strip()
-                details=str(row[5]).strip() if len(row)>5 else ""
-            else:
-                date=str(row[1]).strip(); amount=str(row[2]).strip()
-                head=str(row[3]).strip(); cat=str(row[4]).strip()
-                details=str(row[5]).strip() if len(row)>5 else ""
-            if cat not in CATEGORIES: continue
-            try: float(str(amount).replace(",",""))
-            except: continue
-            display_date = date if date.strip() else time.strftime("%d-%b-%y")
-            data_rows.append(f"{display_date} | {head} | PKR {amount} | {cat} | {details}")
-
-        last_100 = data_rows[-100:] if len(data_rows) > 100 else data_rows
-
-        if not last_100:
-            r = jsonify({"insights": [], "error": "No transactions found"})
-            r.headers["Access-Control-Allow-Origin"] = "*"
-            return r, 200
-
-        today = time.strftime("%d-%B-%Y")
-        current_month = time.strftime("%B %Y")
-        prompt = f"""You are analysing Zakat and charity transaction history for Majid.
-Today's date is {today}. Current month is {current_month}.
-
-Here are the last {len(last_100)} transactions (oldest to newest):
-Format: TXN_DATE | HEAD/CHANNEL | AMOUNT | CATEGORY | DETAILS
-Note: TXN_DATE is when entry was recorded. DETAILS contains the actual coverage period.
-{chr(10).join(last_100)}
-
-═══ CRITICAL INSTRUCTIONS ═══
-
-DATE INTERPRETATION:
-- TXN_DATE = entry date only — do NOT use for gap analysis
-- DETAILS field contains actual coverage period — always read this first
-- Example: details "Bhabhi Naseem - covers Jan to Mar 2026" means paid up to Mar 2026
-- Only flag missing AFTER the coverage period has expired
-
-RECIPIENT FREQUENCY:
-- WEEKLY (flag if no entry in last 10 days): Biryani Dubai
-- MONTHLY (flag if no entry in last 45 days): Bhabhi Naseem, Bhabhi Madiha, Panoaqil Homes, Langar
-- ANNUAL/SEASONAL (NEVER flag as missing): Ramadan giving, Eid giving, Waja Mine, Daig, any Masjid donation
-- Do NOT flag any recipient not in the above lists unless clearly monthly
-
-CURRENT DATE RULES:
-- Today is {today} — do NOT flag as missing if last paid in current or previous month
-- Ramadan is annual — never flag outside Ramadan season
-- Eid ul Fitr and Eid ul Adha are twice yearly — never flag these
-- Never say "missing since June 2026" if we are currently in June 2026
-
-NAMING CONTEXT:
-- "Mama Raja", "Ada Lala", "Bhabhi Naseem", "Bhabhi Madiha", "Maulana Jamshed" are people
-- "through Rafay/Asif/Kamran" means via that person as a channel — not the recipient
-- Panoaqil, Karachi, Dubai, Bahrain are LOCATIONS not recipients
-- "Panoaqil Homes" is a specific charity — track separately from location "Panoaqil"
-- "Biryani Dubai" is a weekly food charity in Dubai — track weekly
-
-BALANCE CONTEXT:
-- Negative Khair balance = more given than received — this is POSITIVE, never flag as problem
-- Only comment on balances if truly anomalous
-
-Analyse and generate exactly 4 insights.
-Priority order: weekly missing > monthly missing > positive patterns > general observations.
-Include at least 1 positive insight.
-
-Each insight must have:
-- "type": "warning" | "amber" | "positive"
-- "text": concise, max 15 words, mention specific name/cause
-
-Return ONLY a JSON array:
-[
-  {{"type": "warning", "text": "..."}},
-  {{"type": "amber",   "text": "..."}},
-  {{"type": "positive","text": "..."}},
-  {{"type": "warning", "text": "..."}}
-]"""
-
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"): raw = raw[4:]
-        raw = raw.strip()
-        insights = json.loads(raw)
-        r = jsonify({"insights": insights, "generated": time.strftime("%Y-%m-%d %H:%M")})
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 200
     except Exception as e:
