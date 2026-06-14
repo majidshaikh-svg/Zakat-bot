@@ -1094,12 +1094,11 @@ Known people in the system (short name → full name):
 Extract:
 1. title: Main action/task (concise, max 8 words)
 2. people: List of short names of people mentioned — use the EXACT short_name from the known list above.
-   FUZZY MATCHING RULES — always resolve to the closest known person:
-   - Match by short name OR full name OR partial name
-   - Typos/misspellings: "Nikesh" → "Nilesh", "Fahd" → "Fahad", "Mehtab" → "Mehtab"
-   - Partial names: "Guru" → "Guru", "Mobin" → "Mobin"
-   - If mentioned name closely resembles a known person, use that person's short_name
-   - Only add as new (unknown) person if no known person is a reasonable match
+   MATCHING RULES:
+   - Match by short name (exact) OR full name (exact) OR first name
+   - Conservative typo correction ONLY for very close matches (1-2 chars different): "Nilesh" for "Nikesh"
+   - NEVER guess a completely different name — if unsure, use the name exactly as written
+   - The app will flag unrecognised names for the user to handle
 3. priority: "urgent" | "high" | "normal" (infer from words like urgent/asap/critical/important)
 4. due_date: ISO date YYYY-MM-DD (parse natural dates like "10th June", "next week", "tomorrow")
 5. subject: Main topic/project (e.g. "Autonomous ERP", "XRG", "Hiring", "Karachi Property")
