@@ -461,7 +461,7 @@ Return ONLY a JSON array:
 [{{"date":"19-Apr-26","amount":50000,"category":"Zakat","details":"Mama Raja - covers Jan 2026"}}]
 If nothing found: [{{"error":"reason"}}]
 Rules:
-- Amount in PKR. 1m=1000000, 1 lakh=100000, 1k=1000
+- Amount in PKR. 1m=1000000, 1 lakh=100000, 1k=1000. 'rs', 'Rs', 'RS', 'rupees', 'rupee' all mean PKR — extract the number before them as the amount
 - Date column = today ({today}) — the date this entry is being recorded
 - Details MUST include the coverage period if mentioned (e.g. "Dr Malla zakat - covers Dec 2025 to Feb 2026")
 - If user mentions a period/month/year in their message, always include it in details
