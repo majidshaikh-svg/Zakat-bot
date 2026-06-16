@@ -466,6 +466,8 @@ Rules:
 - Details MUST include the coverage period if mentioned (e.g. "Dr Malla zakat - covers Dec 2025 to Feb 2026")
 - If user mentions a period/month/year in their message, always include it in details
 - Fix spelling mistakes in category names
+- Domestic staff payments (maid, cook, driver, cleaner, guard, helper, servant) = Khair
+- Home maintenance, utility bills, household expenses = Khair
 - Details should be clean human-readable description. Do NOT repeat the amount or category.
 Recent entries:
 {recent}"""
