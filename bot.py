@@ -268,28 +268,31 @@ Each insight must have:
 - "type": "warning" | "amber" | "positive"
 - "text": concise, max 15 words, mention specific name/cause
 
-Return ONLY a JSON array:
-[
-  {{"type": "warning", "text": "..."}},
-  {{"type": "amber",   "text": "..."}},
-  {{"type": "positive","text": "..."}},
-  {{"type": "warning", "text": "..."}}
-]"""
+You may reason through the dates first if it helps accuracy — that's fine.
+When you're done, output a line containing ONLY the text FINAL_ANSWER: followed
+immediately by the JSON array on that same line, with nothing written after it.
+Example:
+FINAL_ANSWER: [{{"type": "warning", "text": "..."}}, {{"type": "amber", "text": "..."}}, {{"type": "positive", "text": "..."}}, {{"type": "warning", "text": "..."}}]"""
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=500,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.content[0].text.strip()
-        cleaned = raw.replace("```json", "").replace("```", "").strip()
+        marker = "FINAL_ANSWER:"
+        idx = raw.rfind(marker)
+        if idx == -1:
+            raise ValueError(f"Claude returned no FINAL_ANSWER marker: {raw[:150]!r}")
+        cleaned = raw[idx + len(marker):].strip()
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
         try:
             insights = json.loads(cleaned)
         except json.JSONDecodeError:
-            # Claude sometimes adds stray text around the array — pull out the [...] block
+            # Stray text around the array even after the marker — pull out the [...] block
             m = re.search(r"\[.*\]", cleaned, re.DOTALL)
             if not m:
-                raise ValueError(f"Claude returned non-JSON: {cleaned[:150]!r}")
+                raise ValueError(f"Claude returned non-JSON after marker: {cleaned[:150]!r}")
             insights = json.loads(m.group(0))
         row_count = _get_sheet_row_count()
         with _cache_lock:
