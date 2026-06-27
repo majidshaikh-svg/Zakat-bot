@@ -182,10 +182,11 @@ client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 # Claude only runs when data actually changes
 # ══════════════════════════════════════════════════════
 _insight_cache = {
-    "charity":  {"insights": [], "generated": None, "row_count": 0, "error": None},
+    "charity":  {"insights": [], "generated": None, "generated_ts": None, "row_count": 0, "error": None},
     "pulse":    {"insights": [], "generated": None, "action_count": 0},
     "cards":    {"insights": [], "generated": None, "txn_count": 0},
 }
+INSIGHTS_MAX_AGE_SECONDS = 24 * 60 * 60  # auto-regenerate after 24h even with no other trigger
 _cache_lock = threading.Lock()
 
 def _get_sheet_row_count():
@@ -298,6 +299,7 @@ FINAL_ANSWER: [{{"type": "warning", "text": "..."}}, {{"type": "amber", "text": 
         with _cache_lock:
             _insight_cache["charity"]["insights"]  = insights
             _insight_cache["charity"]["generated"] = time.strftime("%Y-%m-%d %H:%M")
+            _insight_cache["charity"]["generated_ts"] = time.time()
             _insight_cache["charity"]["row_count"] = row_count
             _insight_cache["charity"]["error"] = None
         logger.info(f"Charity insights regenerated — {len(insights)} insights, {row_count} rows")
@@ -1032,10 +1034,11 @@ def api_charity_insights():
     try:
         force = request.args.get("force", "").lower() in ("1", "true", "yes")
         if not force:
-            # Return cache if available
+            # Return cache if available AND still fresh (under 24h old)
             with _cache_lock:
                 cached = _insight_cache["charity"]
-                if cached["insights"] and cached["generated"]:
+                age = time.time() - (cached.get("generated_ts") or 0)
+                if cached["insights"] and cached["generated"] and age < INSIGHTS_MAX_AGE_SECONDS:
                     r = jsonify({
                         "insights":  cached["insights"],
                         "generated": cached["generated"],
