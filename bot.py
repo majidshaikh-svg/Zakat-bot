@@ -170,7 +170,7 @@ client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 # Claude only runs when data actually changes
 # ══════════════════════════════════════════════════════
 _insight_cache = {
-    "charity":  {"insights": [], "generated": None, "row_count": 0},
+    "charity":  {"insights": [], "generated": None, "row_count": 0, "error": None},
     "pulse":    {"insights": [], "generated": None, "action_count": 0},
     "cards":    {"insights": [], "generated": None, "txn_count": 0},
 }
@@ -270,19 +270,27 @@ Return ONLY a JSON array:
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"): raw = raw[4:]
-        insights = json.loads(raw.strip())
+        cleaned = raw.replace("```json", "").replace("```", "").strip()
+        try:
+            insights = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Claude sometimes adds stray text around the array — pull out the [...] block
+            m = re.search(r"\[.*\]", cleaned, re.DOTALL)
+            if not m:
+                raise
+            insights = json.loads(m.group(0))
         row_count = _get_sheet_row_count()
         with _cache_lock:
             _insight_cache["charity"]["insights"]  = insights
             _insight_cache["charity"]["generated"] = time.strftime("%Y-%m-%d %H:%M")
             _insight_cache["charity"]["row_count"] = row_count
+            _insight_cache["charity"]["error"] = None
         logger.info(f"Charity insights regenerated — {len(insights)} insights, {row_count} rows")
         return insights
     except Exception as e:
         logger.error(f"Charity insights generation error: {e}")
+        with _cache_lock:
+            _insight_cache["charity"]["error"] = str(e)
         return []
 
 def fmt(n):
@@ -1007,20 +1015,29 @@ def api_charity_insights():
         r.headers["Access-Control-Allow-Headers"] = "*"
         return r, 200
     try:
-        # Return cache if available
-        with _cache_lock:
-            cached = _insight_cache["charity"]
-            if cached["insights"] and cached["generated"]:
-                r = jsonify({
-                    "insights":  cached["insights"],
-                    "generated": cached["generated"],
-                    "cached":    True
-                })
-                r.headers["Access-Control-Allow-Origin"] = "*"
-                return r, 200
-        # Cache empty — generate now
+        force = request.args.get("force", "").lower() in ("1", "true", "yes")
+        if not force:
+            # Return cache if available
+            with _cache_lock:
+                cached = _insight_cache["charity"]
+                if cached["insights"] and cached["generated"]:
+                    r = jsonify({
+                        "insights":  cached["insights"],
+                        "generated": cached["generated"],
+                        "cached":    True
+                    })
+                    r.headers["Access-Control-Allow-Origin"] = "*"
+                    return r, 200
+        # Cache empty, or force-refresh requested — generate now
         insights = _generate_charity_insights()
-        r = jsonify({"insights": insights, "generated": time.strftime("%Y-%m-%d %H:%M"), "cached": False})
+        with _cache_lock:
+            err = _insight_cache["charity"].get("error")
+        r = jsonify({
+            "insights": insights,
+            "generated": time.strftime("%Y-%m-%d %H:%M"),
+            "cached": False,
+            "error": err if not insights else None,
+        })
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 200
     except Exception as e:
