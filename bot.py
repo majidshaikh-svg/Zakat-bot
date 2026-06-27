@@ -143,6 +143,26 @@ def append_entry(date, amount, category, details, drive_link="", raw_message="",
         result = json.loads(r.read().decode())
     return result.get("txn_id", ""), result.get("row", 0)
 
+def update_entry(txn_id, date=None, amount=None, category=None, details=None):
+    """Edit an existing saved entry by txn_id. Requires the Apps Script web app
+    to support an 'update' action — see /api/transaction/<id> PUT for details."""
+    payload = {"action": "update", "txn_id": txn_id}
+    if date is not None:     payload["date"] = date
+    if amount is not None:   payload["amount"] = amount
+    if category is not None: payload["category"] = category
+    if details is not None:  payload["details"] = details
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(SCRIPT_URL, data=data, method="POST")
+    req.add_header("Content-Type", "text/plain")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read().decode()
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"success": False, "error": "Apps Script did not return JSON — the 'update' action likely isn't implemented in Code.gs yet"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 # ══════════════════════════════════════════════════════
@@ -908,6 +928,31 @@ def api_transactions():
             results.append(e)
         return jsonify({"transactions":list(reversed(results[-limit:]))})
     except Exception as e: return jsonify({"error":str(e)}),500
+
+@flask_app.route("/api/transaction/<txn_id>", methods=["GET","PUT"])
+def api_transaction_detail(txn_id):
+    try:
+        if request.method == "GET":
+            rows = get_rows()
+            for row in rows[1:]:
+                e = row_to_entry(row)
+                if e and e["txn_id"] == txn_id:
+                    return jsonify(e)
+            return jsonify({"error": "Transaction not found"}), 404
+        # PUT — edit an existing entry
+        data = request.get_json() or {}
+        result = update_entry(
+            txn_id,
+            date=data.get("date"),
+            amount=data.get("amount"),
+            category=data.get("category"),
+            details=data.get("details"),
+        )
+        if not result.get("success"):
+            return jsonify({"error": result.get("error", "Update failed")}), 500
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @flask_app.route("/api/analyze", methods=["POST"])
 def api_analyze():
