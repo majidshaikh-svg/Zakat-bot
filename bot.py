@@ -113,9 +113,7 @@ def rename_drive_file(drive_link, new_name):
         logger.error(f"Drive rename error: {e}")
 
 def get_balances():
-    url = SCRIPT_URL + "?t=" + str(int(time.time()))
-    with urllib.request.urlopen(url, timeout=15) as r:
-        rows = json.loads(r.read().decode())
+    rows = get_rows()
     bal = {"Zakat": 0, "Khair": 0, "Asanee": 0}
     try: bal["Khair"]  = float(str(rows[4][12]).replace(",","").replace(" ",""))
     except: pass
@@ -126,9 +124,23 @@ def get_balances():
     return bal
 
 def get_rows():
+    """Fetch sheet data from the Apps Script web app. Retries with backoff because
+    the Charity page fires balances/transactions/insights requests to this same
+    SCRIPT_URL concurrently on load, and Apps Script web apps can return an empty
+    or non-JSON body under simultaneous hits — which surfaces as a confusing
+    'Expecting value: line 1 column 1' JSON error with no other context."""
     url = SCRIPT_URL + "?t=" + str(int(time.time()))
-    with urllib.request.urlopen(url, timeout=15) as r:
-        return json.loads(r.read().decode())
+    last_err = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                raw = r.read().decode()
+            return json.loads(raw)
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    raise RuntimeError(f"Sheet fetch failed after 3 attempts: {last_err}")
 
 def append_entry(date, amount, category, details, drive_link="", raw_message="", input_type="text"):
     payload = {
@@ -277,7 +289,7 @@ Return ONLY a JSON array:
             # Claude sometimes adds stray text around the array — pull out the [...] block
             m = re.search(r"\[.*\]", cleaned, re.DOTALL)
             if not m:
-                raise
+                raise ValueError(f"Claude returned non-JSON: {cleaned[:150]!r}")
             insights = json.loads(m.group(0))
         row_count = _get_sheet_row_count()
         with _cache_lock:
