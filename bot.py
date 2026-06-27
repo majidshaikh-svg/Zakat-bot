@@ -450,10 +450,29 @@ def apply_corrections(entries, text):
     updated = [e for i, e in enumerate(entries) if i not in to_remove]
     return updated, corrections
 
+def detect_image_media_type(img_bytes):
+    """Sniff actual image format from magic bytes — never trust a caller-supplied label.
+    Browsers/iOS send screenshots as PNG; Telegram always sends JPEG. Anthropic's
+    vision API requires the declared media_type to match the real bytes, so a
+    mismatch (e.g. PNG data labeled image/jpeg) causes the API call to error out."""
+    if img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if img_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if img_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"  # fallback for anything unrecognized
+
 def extract(text, img_b64=None, recent=""):
     content = []
     if img_b64:
-        content.append({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":img_b64}})
+        try:
+            media_type = detect_image_media_type(base64.b64decode(img_b64))
+        except Exception:
+            media_type = "image/jpeg"
+        content.append({"type":"image","source":{"type":"base64","media_type":media_type,"data":img_b64}})
     content.append({"type":"text","text": text or "See attached."})
     today = time.strftime("%d-%b-%y")
     system = f"""Extract ALL charity payment entries. Categories: Zakat, Khair, Asanee.
