@@ -510,6 +510,40 @@ def detect_image_media_type(img_bytes):
         return "image/webp"
     return "image/jpeg"  # fallback for anything unrecognized
 
+def extract_generic(text, img_b64=None):
+    """General-purpose expense/payment extraction — no charity framing, no forced
+    Zakat/Khair/Asanee categories. For Ledger Pending Entries and anything else that
+    isn't specifically a Charity payment. Any currency, any kind of expense."""
+    content = []
+    if img_b64:
+        try:
+            media_type = detect_image_media_type(base64.b64decode(img_b64))
+        except Exception:
+            media_type = "image/jpeg"
+        content.append({"type":"image","source":{"type":"base64","media_type":media_type,"data":img_b64}})
+    content.append({"type":"text","text": text or "See attached."})
+    system = """Extract the amount and a clean description from this expense or payment record.
+This is a general expense — NOT a charity payment, do not categorize it as Zakat/Khair/Asanee
+or assume any specific currency.
+Return ONLY a JSON array: [{"amount":1230,"details":"University hostel fee, Italy, via Alfardan Exchange"}]
+If nothing found: [{"error":"reason"}]
+Rules:
+- Amount: the numeric value of the payment/expense, whatever currency it's actually in
+- Details: a clean, human-readable description of what this was for and who it involved —
+  pull names, purpose, destination, payment method from the image/text if present
+- Do NOT invent a category. Do NOT assume PKR specifically unless the text/image clearly states it."""
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=800, system=system, messages=[{"role":"user","content":content}])
+    raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            raise ValueError(f"Claude returned non-JSON: {raw[:200]!r}")
+        result = json.loads(m.group(0))
+    if isinstance(result, dict): result = [result]
+    return result
+
 def extract(text, img_b64=None, recent=""):
     content = []
     if img_b64:
@@ -994,6 +1028,14 @@ def api_analyze():
         data=request.get_json()
         text=data.get("text","")
         img_b64=data.get("image_b64",None)
+        entry_type=data.get("type","extract")
+
+        if entry_type == "pending_entry":
+            entries = extract_generic(text, img_b64=img_b64)
+            if not entries or "error" in entries[0]:
+                return jsonify({"error": entries[0].get("error","unknown") if entries else "unknown"}), 400
+            return jsonify(entries[0])
+
         rows=get_rows()
         recent_parts=[]
         for r in rows[-10:]:
