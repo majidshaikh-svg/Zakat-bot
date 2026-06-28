@@ -537,7 +537,16 @@ Recent entries:
 {recent}"""
     r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000, system=system, messages=[{"role":"user","content":content}])
     raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
-    result = json.loads(raw)
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        # Claude sometimes adds stray text around the array (more likely on complex/
+        # unusual documents) — pull out the [...] block as a fallback, same fix as
+        # the Charity Insights parsing fragility found earlier.
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            raise ValueError(f"Claude returned non-JSON: {raw[:200]!r}")
+        result = json.loads(m.group(0))
     if isinstance(result, dict): result = [result]
     for e in result:
         if not e.get("date") or e.get("date") in ["unknown", ""]:
