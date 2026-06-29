@@ -510,10 +510,13 @@ def detect_image_media_type(img_bytes):
         return "image/webp"
     return "image/jpeg"  # fallback for anything unrecognized
 
-def extract_generic(text, img_b64=None):
+def extract_generic(text, img_b64=None, categories=None):
     """General-purpose expense/payment extraction — no charity framing, no forced
     Zakat/Khair/Asanee categories. For Ledger Pending Entries and anything else that
-    isn't specifically a Charity payment. Any currency, any kind of expense."""
+    isn't specifically a Charity payment. Any currency, any kind of expense.
+    If `categories` is passed, Claude picks exactly one from that list instead of
+    inventing its own — keeps it consistent with whatever category set the calling
+    book/currency actually uses."""
     content = []
     if img_b64:
         try:
@@ -522,16 +525,21 @@ def extract_generic(text, img_b64=None):
             media_type = "image/jpeg"
         content.append({"type":"image","source":{"type":"base64","media_type":media_type,"data":img_b64}})
     content.append({"type":"text","text": text or "See attached."})
-    system = """Extract the amount and a clean description from this expense or payment record.
+
+    cat_rule = ""
+    if categories:
+        cat_rule = f'\n- category: pick exactly ONE from this list: {", ".join(categories)}. If genuinely unsure, use "Others". Do not invent a category outside this list.'
+
+    system = f"""Extract the amount and a clean description from this expense or payment record.
 This is a general expense — NOT a charity payment, do not categorize it as Zakat/Khair/Asanee
 or assume any specific currency.
-Return ONLY a JSON array: [{"amount":1230,"details":"University hostel fee, Italy, via Alfardan Exchange"}]
-If nothing found: [{"error":"reason"}]
+Return ONLY a JSON array: [{{"amount":1230,"details":"University hostel fee, Italy, via Alfardan Exchange"{', "category":"Family"' if categories else ''}}}]
+If nothing found: [{{"error":"reason"}}]
 Rules:
 - Amount: the numeric value of the payment/expense, whatever currency it's actually in
 - Details: a clean, human-readable description of what this was for and who it involved —
   pull names, purpose, destination, payment method from the image/text if present
-- Do NOT invent a category. Do NOT assume PKR specifically unless the text/image clearly states it."""
+- Do NOT assume PKR specifically unless the text/image clearly states it.{cat_rule}"""
     r = client.messages.create(model="claude-sonnet-4-6", max_tokens=800, system=system, messages=[{"role":"user","content":content}])
     raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
     try:
@@ -1031,7 +1039,8 @@ def api_analyze():
         entry_type=data.get("type","extract")
 
         if entry_type == "pending_entry":
-            entries = extract_generic(text, img_b64=img_b64)
+            categories = data.get("categories")
+            entries = extract_generic(text, img_b64=img_b64, categories=categories)
             if not entries or "error" in entries[0]:
                 return jsonify({"error": entries[0].get("error","unknown") if entries else "unknown"}), 400
             return jsonify(entries[0])
@@ -1057,6 +1066,25 @@ def api_analyze():
         return jsonify(e)
     except Exception as ex:
         return jsonify({"error":str(ex)}),500
+
+@flask_app.route("/api/upload-image", methods=["POST"])
+def api_upload_image():
+    """Generic Drive upload, reusable by anything that needs to store a screenshot —
+    not specific to Charity. Returns a drive_link the caller stores wherever makes sense."""
+    try:
+        data = request.get_json() or {}
+        img_b64 = data.get("image_b64")
+        filename = data.get("filename") or f"upload-{int(time.time())}.jpg"
+        if not img_b64:
+            return jsonify({"error": "No image_b64 provided"}), 400
+        img_bytes = base64.b64decode(img_b64)
+        compressed = compress_image(img_bytes)
+        drive_link = upload_to_drive(compressed, filename)
+        if not drive_link:
+            return jsonify({"error": "Drive upload failed"}), 500
+        return jsonify({"drive_link": drive_link})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @flask_app.route("/api/save", methods=["POST"])
 def api_save():
