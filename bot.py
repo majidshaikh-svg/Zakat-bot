@@ -510,13 +510,18 @@ def detect_image_media_type(img_bytes):
         return "image/webp"
     return "image/jpeg"  # fallback for anything unrecognized
 
-def extract_generic(text, img_b64=None, categories=None):
+def extract_generic(text, img_b64=None, categories=None, currencies=None):
     """General-purpose expense/payment extraction — no charity framing, no forced
     Zakat/Khair/Asanee categories. For Ledger Pending Entries and anything else that
     isn't specifically a Charity payment. Any currency, any kind of expense.
     If `categories` is passed, Claude picks exactly one from that list instead of
     inventing its own — keeps it consistent with whatever category set the calling
-    book/currency actually uses."""
+    book/currency actually uses.
+    If `currencies` is passed (the person's actual available ledger currencies),
+    Claude guesses which one this payment is actually in, from signals in the
+    text/image (currency symbols, exchange terms, locations, etc.) — never invents
+    a currency outside that list, and the caller still shows this as an editable
+    field rather than trusting it blindly."""
     content = []
     if img_b64:
         try:
@@ -530,16 +535,22 @@ def extract_generic(text, img_b64=None, categories=None):
     if categories:
         cat_rule = f'\n- category: pick exactly ONE from this list: {", ".join(categories)}. If genuinely unsure, use "Others". Do not invent a category outside this list.'
 
+    cur_rule = ""
+    cur_example = ""
+    if currencies and len(currencies) > 1:
+        cur_rule = f'\n- currency: which ledger this belongs to — pick exactly ONE from this list: {", ".join(currencies)}. Base this on actual signals (currency symbols, "AED"/"PKR"/exchange terms, locations mentioned) — if there is no clear signal, just pick the most likely one, the user will review and can change it.'
+        cur_example = ', "currency":"AED"'
+
     system = f"""Extract the amount and a clean description from this expense or payment record.
 This is a general expense — NOT a charity payment, do not categorize it as Zakat/Khair/Asanee
 or assume any specific currency.
-Return ONLY a JSON array: [{{"amount":1230,"details":"University hostel fee, Italy, via Alfardan Exchange"{', "category":"Family"' if categories else ''}}}]
+Return ONLY a JSON array: [{{"amount":1230,"details":"University hostel fee, Italy, via Alfardan Exchange"{', "category":"Family"' if categories else ''}{cur_example}}}]
 If nothing found: [{{"error":"reason"}}]
 Rules:
 - Amount: the numeric value of the payment/expense, whatever currency it's actually in
 - Details: a clean, human-readable description of what this was for and who it involved —
   pull names, purpose, destination, payment method from the image/text if present
-- Do NOT assume PKR specifically unless the text/image clearly states it.{cat_rule}"""
+- Do NOT assume PKR specifically unless the text/image clearly states it.{cat_rule}{cur_rule}"""
     r = client.messages.create(model="claude-sonnet-4-6", max_tokens=800, system=system, messages=[{"role":"user","content":content}])
     raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
     try:
@@ -1040,7 +1051,8 @@ def api_analyze():
 
         if entry_type == "pending_entry":
             categories = data.get("categories")
-            entries = extract_generic(text, img_b64=img_b64, categories=categories)
+            currencies = data.get("currencies")
+            entries = extract_generic(text, img_b64=img_b64, categories=categories, currencies=currencies)
             if not entries or "error" in entries[0]:
                 return jsonify({"error": entries[0].get("error","unknown") if entries else "unknown"}), 400
             return jsonify(entries[0])
