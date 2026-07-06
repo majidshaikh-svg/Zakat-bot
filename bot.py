@@ -2342,11 +2342,20 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
             def cell(idx, default=""):
                 return str(row[idx]).strip() if len(row) > idx and row[idx] not in (None, "") else default
 
-            debit_desc  = cell(0)
-            debit_amt   = float((cell(1, "0").replace(",", "") or "0"))
-            credit_desc = cell(2)
-            credit_amt  = float((cell(3, "0").replace(",", "") or "0"))
-            balance     = float((cell(4, "0").replace(",", "") or "0"))
+            if currency == 'PKR':
+                # PKR sheet layout: A=Profits(CR desc), B=CR amt, C=Payments(DR desc), D=DR amt, E=Balance
+                credit_desc = cell(0)
+                credit_amt  = float((cell(1, "0").replace(",", "") or "0"))
+                debit_desc  = cell(2)
+                debit_amt   = float((cell(3, "0").replace(",", "") or "0"))
+                balance     = float((cell(4, "0").replace(",", "") or "0"))
+            else:
+                # AED (and any other non-PKR book) — unchanged for now, known broken, separate task
+                debit_desc  = cell(0)
+                debit_amt   = float((cell(1, "0").replace(",", "") or "0"))
+                credit_desc = cell(2)
+                credit_amt  = float((cell(3, "0").replace(",", "") or "0"))
+                balance     = float((cell(4, "0").replace(",", "") or "0"))
 
             # Skip empty rows
             if debit_amt == 0 and credit_amt == 0 and not debit_desc and not credit_desc:
