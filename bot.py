@@ -2284,101 +2284,285 @@ def _fetch_ledger_sheet(sheet_id, sheet_tab):
     raise RuntimeError("LEDGER_SCRIPT_URL not configured — set this env var in Railway")
 
 def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
-    """Sync one ledger book from Google Sheet to Supabase. Returns (added, changed, errors)."""
+    """Sync one ledger book from Google Sheet to Supabase.
+    NEW behaviour: new sheet rows go into ledger_pending_entries (source='sync')
+    not directly into ledger_entries. Majid reviews and approves each one.
+    Existing rows in ledger_entries are left unchanged (already approved history).
+    Returns (added_to_pending, already_known, errors, sync_log_id).
+    """
     import datetime
 
     rows = _fetch_ledger_sheet(sheet_id, sheet_tab)
     if not rows or len(rows) < 2:
-        return 0, 0, 0
-
-    # Fetch existing entries for this book
-    r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/ledger_entries?person_id=eq.{person_id}&book_id=eq.{book_id}&select=id,row_index,debit_desc,credit_desc,balance",
-        headers=SB_HEADERS
-    )
-    existing = {e["row_index"]: e for e in (r.json() if r.ok else [])}
+        return 0, 0, 0, None
 
     now = datetime.datetime.utcnow().isoformat() + "Z"
-    added = changed = errors = 0
 
-    for i, row in enumerate(rows[1:], start=2):  # skip header row, 1-indexed
+    # 1. What row_indexes are already in ledger_entries (approved history)?
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/ledger_entries?person_id=eq.{person_id}&book_id=eq.{book_id}&select=row_index",
+        headers=SB_HEADERS
+    )
+    approved_rows = {e["row_index"] for e in (r.json() if r.ok else [])}
+
+    # 2. What row_indexes are already in ledger_pending_entries (awaiting review)?
+    r2 = requests.get(
+        f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?person_id=eq.{person_id}&book_id=eq.{book_id}&source=eq.sync&select=id,sheet_row_index,amount,status",
+        headers=SB_HEADERS
+    )
+    pending_sync_rows = {e.get("sheet_row_index"): e for e in (r2.json() if r2.ok else [])}
+
+    # 3. Load manual pending entries for auto-match suggestions
+    r3 = requests.get(
+        f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?person_id=eq.{person_id}&book_id=eq.{book_id}&source=eq.manual&status=eq.pending&select=id,amount,name,description",
+        headers=SB_HEADERS
+    )
+    manual_pending = r3.json() if r3.ok else []
+
+    # 4. Create sync log first to get the batch ID
+    log_r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/ledger_sync_log",
+        headers={**SB_HEADERS, "Prefer": "return=representation"},
+        json={
+            "person_id":        person_id,
+            "synced_at":        now,
+            "added_count":      0,
+            "changed_count":    0,
+            "deleted_count":    0,
+            "math_error_count": 0,
+        }
+    )
+    sync_log_id = (log_r.json() or [{}])[0].get("id") if log_r.ok else None
+
+    added = already_known = errors = 0
+
+    for i, row in enumerate(rows[1:], start=2):
         try:
-            # Flexible column mapping — adjust if sheet layout differs
             def cell(idx, default=""):
                 return str(row[idx]).strip() if len(row) > idx and row[idx] not in (None, "") else default
 
-            debit_desc   = cell(0)
-            debit_amount = cell(1, "0").replace(",", "") or "0"
-            credit_desc  = cell(2)
-            credit_amt   = cell(3, "0").replace(",", "") or "0"
-            balance      = cell(4, "0").replace(",", "") or "0"
+            debit_desc  = cell(0)
+            debit_amt   = float((cell(1, "0").replace(",", "") or "0"))
+            credit_desc = cell(2)
+            credit_amt  = float((cell(3, "0").replace(",", "") or "0"))
+            balance     = float((cell(4, "0").replace(",", "") or "0"))
 
-            try: debit_amount = float(debit_amount)
-            except: debit_amount = 0.0
-            try: credit_amt = float(credit_amt)
-            except: credit_amt = 0.0
-            try: balance = float(balance)
-            except: balance = 0.0
-
-            # Skip completely empty rows
-            if debit_amount == 0 and credit_amt == 0 and not debit_desc and not credit_desc:
+            # Skip empty rows
+            if debit_amt == 0 and credit_amt == 0 and not debit_desc and not credit_desc:
                 continue
 
-            entry = {
-                "person_id":     person_id,
-                "book_id":       book_id,
-                "row_index":     i,
-                "debit_desc":    debit_desc or None,
-                "debit_amount":  debit_amount,
-                "credit_desc":   credit_desc or None,
-                "credit_amount": credit_amt,
-                "balance":       balance,
-                "last_synced_at": now,
-            }
+            # Already approved or already in pending — skip
+            if i in approved_rows:
+                already_known += 1
+                continue
+            if i in pending_sync_rows:
+                already_known += 1
+                continue
 
-            if i not in existing:
-                # New row — insert and mark is_new
-                entry["first_synced_at"] = now
-                entry["is_new"] = True
-                r2 = requests.post(
-                    f"{SUPABASE_URL}/rest/v1/ledger_entries",
-                    headers={**SB_HEADERS, "Prefer": "return=minimal"},
-                    json=entry
-                )
-                if r2.ok: added += 1
-                else: errors += 1
+            # Determine main side (credit = money in, debit = money out)
+            is_credit  = credit_amt > 0
+            desc       = credit_desc if is_credit else debit_desc
+            amount     = credit_amt  if is_credit else debit_amt
+            # Try to detect date from description
+            import re
+            date_match = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b', desc or "")
+            detected_date = date_match.group(1) if date_match else None
+
+            # Auto-match: look for a manual pending entry with the same amount
+            suggested_match_id = None
+            for mp in manual_pending:
+                try:
+                    if abs(float(mp.get("amount") or 0) - amount) < 0.01:
+                        suggested_match_id = mp["id"]
+                        break
+                except: pass
+
+            pending_entry = {
+                "person_id":       person_id,
+                "book_id":         book_id,
+                "source":          "sync",
+                "status":          "pending",
+                "sheet_row_index": i,
+                "name":            desc[:200] if desc else None,
+                "description":     f"{'Credit' if is_credit else 'Debit'} · Row {i} · {debit_desc or ''} / {credit_desc or ''}".strip(" ·/"),
+                "amount":          amount,
+                "date_performed":  detected_date,
+                "sync_batch_id":   sync_log_id,
+                "notes":           f"debit_desc={debit_desc}|credit_desc={credit_desc}|debit_amt={debit_amt}|credit_amt={credit_amt}|balance={balance}",
+            }
+            if suggested_match_id:
+                pending_entry["suggested_manual_id"] = suggested_match_id
+
+            pr = requests.post(
+                f"{SUPABASE_URL}/rest/v1/ledger_pending_entries",
+                headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                json=pending_entry
+            )
+            if pr.ok:
+                added += 1
             else:
-                # Existing row — check if balance or desc changed
-                ex = existing[i]
-                if (abs(float(ex.get("balance") or 0) - balance) > 0.01 or
-                    (ex.get("debit_desc") or "") != debit_desc or
-                    (ex.get("credit_desc") or "") != credit_desc):
-                    entry["is_new"] = True  # changed row also flagged
-                    r2 = requests.patch(
-                        f"{SUPABASE_URL}/rest/v1/ledger_entries?id=eq.{ex['id']}",
-                        headers={**SB_HEADERS, "Prefer": "return=minimal"},
-                        json=entry
-                    )
-                    if r2.ok: changed += 1
-                    else: errors += 1
+                logger.warning(f"Pending insert failed row {i}: {pr.text}")
+                errors += 1
+
         except Exception as e:
             logger.warning(f"Ledger sync row {i} error: {e}")
             errors += 1
 
-    # Log the sync
-    requests.post(
-        f"{SUPABASE_URL}/rest/v1/ledger_sync_log",
-        headers={**SB_HEADERS, "Prefer": "return=minimal"},
-        json={
-            "person_id":        person_id,
-            "synced_at":        now,
-            "added_count":      added,
-            "changed_count":    changed,
-            "deleted_count":    0,
-            "math_error_count": errors,
-        }
-    )
-    return added, changed, errors
+    # Update the sync log with final counts
+    if sync_log_id:
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/ledger_sync_log?id=eq.{sync_log_id}",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            json={"added_count": added, "math_error_count": errors}
+        )
+
+    return added, already_known, errors, sync_log_id
+
+
+@flask_app.route("/api/ledger/pending/<int:pending_id>/approve", methods=["POST"])
+def api_ledger_pending_approve(pending_id):
+    """Approve a sync pending entry — move it to ledger_entries as a confirmed transaction."""
+    import datetime
+    try:
+        now = datetime.datetime.utcnow().isoformat() + "Z"
+
+        # Fetch the pending entry
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
+            headers=SB_HEADERS
+        )
+        entries = r.json()
+        if not entries:
+            return jsonify({"error": "Pending entry not found"}), 404
+        p = entries[0]
+
+        # Parse the stored raw data from notes field
+        notes = p.get("notes", "")
+        raw = {}
+        for part in notes.split("|"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                raw[k.strip()] = v.strip()
+
+        debit_desc   = raw.get("debit_desc")  or None
+        credit_desc  = raw.get("credit_desc") or None
+        debit_amount = float(raw.get("debit_amt",  0) or 0)
+        credit_amt   = float(raw.get("credit_amt", 0) or 0)
+        balance      = float(raw.get("balance",    0) or 0)
+        sheet_row    = p.get("sheet_row_index")
+
+        # Create confirmed ledger_entries row
+        entry_r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/ledger_entries",
+            headers={**SB_HEADERS, "Prefer": "return=representation"},
+            json={
+                "person_id":      p["person_id"],
+                "book_id":        p["book_id"],
+                "row_index":      sheet_row,
+                "debit_desc":     debit_desc,
+                "debit_amount":   debit_amount,
+                "credit_desc":    credit_desc,
+                "credit_amount":  credit_amt,
+                "balance":        balance,
+                "first_synced_at": now,
+                "last_synced_at":  now,
+                "category":       p.get("category"),
+            }
+        )
+        if not entry_r.ok:
+            return jsonify({"error": f"Failed to create ledger entry: {entry_r.text}"}), 500
+
+        new_entry_id = (entry_r.json() or [{}])[0].get("id")
+
+        # Update pending entry to matched
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            json={
+                "status":            "matched",
+                "matched_at":        now,
+                "matched_entry_id":  new_entry_id,
+                "matched_sheet_row": sheet_row,
+                "matched_by":        "manual",
+            }
+        )
+
+        # If this sync entry was suggested as a match for a manual entry, close that too
+        suggested_manual_id = p.get("suggested_manual_id")
+        if suggested_manual_id:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{suggested_manual_id}",
+                headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                json={
+                    "status":            "matched",
+                    "matched_at":        now,
+                    "matched_entry_id":  new_entry_id,
+                    "matched_sheet_row": sheet_row,
+                    "matched_by":        "auto",
+                }
+            )
+
+        return jsonify({"status": "ok", "ledger_entry_id": new_entry_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route("/api/ledger/pending/<int:pending_id>/dismiss", methods=["POST"])
+def api_ledger_pending_dismiss(pending_id):
+    """Dismiss a sync pending entry — won't appear again."""
+    import datetime
+    try:
+        now = datetime.datetime.utcnow().isoformat() + "Z"
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            json={"status": "dismissed", "dismissed_at": now}
+        )
+        return jsonify({"status": "ok"}) if r.ok else jsonify({"error": r.text}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route("/api/ledger/pending/<int:pending_id>/match/<int:entry_id>", methods=["POST"])
+def api_ledger_pending_match(pending_id, entry_id):
+    """Manually match a manual pending entry to an existing ledger_entries row."""
+    import datetime
+    try:
+        now = datetime.datetime.utcnow().isoformat() + "Z"
+        # Fetch the ledger entry to get its row_index
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/ledger_entries?id=eq.{entry_id}&select=row_index",
+            headers=SB_HEADERS
+        )
+        entry = (r.json() or [{}])[0]
+        sheet_row = entry.get("row_index")
+        r2 = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            json={
+                "status":            "matched",
+                "matched_at":        now,
+                "matched_entry_id":  entry_id,
+                "matched_sheet_row": sheet_row,
+                "matched_by":        "manual",
+            }
+        )
+        return jsonify({"status": "ok"}) if r2.ok else jsonify({"error": r2.text}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route("/api/ledger/pending/<int:pending_id>/delete", methods=["POST", "DELETE"])
+def api_ledger_pending_delete(pending_id):
+    """Delete a manual pending entry added by mistake."""
+    try:
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"}
+        )
+        return jsonify({"status": "ok"}) if r.ok else jsonify({"error": r.text}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @flask_app.route("/api/ledger/sync", methods=["POST", "GET"])
@@ -2411,7 +2595,7 @@ def api_ledger_sync():
                 if book.get("currency") != "PKR":
                     continue
                 try:
-                    added, changed, errors = _sync_ledger_book(
+                    added, already_known, errors, sync_log_id = _sync_ledger_book(
                         person_id=person["id"],
                         book_id=book["id"],
                         sheet_id=person["sheet_id"],
@@ -2419,14 +2603,15 @@ def api_ledger_sync():
                         currency="PKR"
                     )
                     total_added += added
-                    total_changed += changed
+                    total_changed += already_known
                     total_errors += errors
                     results.append({
                         "person": person["display_name"],
                         "book": book["label"],
-                        "added": added,
-                        "changed": changed,
-                        "errors": errors
+                        "added_to_pending": added,
+                        "already_known": already_known,
+                        "errors": errors,
+                        "sync_log_id": sync_log_id,
                     })
                 except Exception as e:
                     logger.error(f"Ledger sync failed for {person['display_name']}: {e}")
