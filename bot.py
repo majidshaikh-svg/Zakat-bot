@@ -2592,16 +2592,13 @@ def api_ledger_sync():
             books = rb.json() if rb.ok else []
 
             for book in books:
-                # Only sync PKR (the sheet-backed one) — AED was a one-time import
-                if book.get("currency") != "PKR":
-                    continue
-                try:
+                # Sync all books — both PKR and AED
                     added, already_known, errors, sync_log_id = _sync_ledger_book(
                         person_id=person["id"],
                         book_id=book["id"],
                         sheet_id=person["sheet_id"],
                         sheet_tab=book.get("sheet_tab", "Sheet1"),
-                        currency="PKR"
+                        currency=book.get("currency", "PKR")
                     )
                     total_added += added
                     total_changed += already_known
