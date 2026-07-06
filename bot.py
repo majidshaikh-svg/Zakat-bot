@@ -2349,8 +2349,24 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
                 debit_desc  = cell(2)
                 debit_amt   = float((cell(3, "0").replace(",", "") or "0"))
                 balance     = float((cell(4, "0").replace(",", "") or "0"))
+            elif currency == 'AED':
+                # AED sheet layout: A=description, B=signed amount (+ = money in, - = money out), C=sparse notes (ignored)
+                desc_raw = cell(0)
+                amt_raw  = float((cell(1, "0").replace(",", "") or "0"))
+
+                # Skip annotation/section-header rows (blank amount) and the sheet's own "Balance" summary row
+                if amt_raw == 0 or desc_raw.strip().lower() == "balance":
+                    continue
+
+                if amt_raw >= 0:
+                    credit_desc, credit_amt = desc_raw, amt_raw
+                    debit_desc,  debit_amt  = "", 0.0
+                else:
+                    debit_desc,  debit_amt  = desc_raw, abs(amt_raw)
+                    credit_desc, credit_amt = "", 0.0
+                balance = 0.0  # no real per-row balance in this sheet
             else:
-                # AED (and any other non-PKR book) — unchanged for now, known broken, separate task
+                # Any other non-PKR/non-AED book — unchanged fallback, not currently used
                 debit_desc  = cell(0)
                 debit_amt   = float((cell(1, "0").replace(",", "") or "0"))
                 credit_desc = cell(2)
