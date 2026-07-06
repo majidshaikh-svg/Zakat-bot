@@ -2264,6 +2264,209 @@ def api_cards_migrate_old():
         return r, 500
 
 
+# ── LEDGER SHEET SYNC ────────────────────────────────────────────────────────
+# Syncs Mama Shakeel's PKR ledger from Google Sheet into Supabase ledger_entries.
+# Designed to be called by Railway cron every 5 days, and also manually via POST.
+# New/changed rows are marked is_new=true so the UI can flag them.
+# Sheet format: col A=Date, B=Debit desc, C=Debit amt, D=Credit desc, E=Credit amt, F=Balance
+# (or whatever the actual column order is — adjust COLS below if needed)
+
+LEDGER_SCRIPT_URL = os.environ.get("LEDGER_SCRIPT_URL", "")  # separate Apps Script for ledger sheet
+
+def _fetch_ledger_sheet(sheet_id, sheet_tab):
+    """Fetch ledger sheet rows via Google Sheets API using service account."""
+    import urllib.parse
+    # Use Apps Script URL if configured, else fall back to Sheets API
+    if LEDGER_SCRIPT_URL:
+        url = f"{LEDGER_SCRIPT_URL}?sheet_id={urllib.parse.quote(sheet_id)}&tab={urllib.parse.quote(sheet_tab)}&t={int(time.time())}"
+        with urllib.request.urlopen(url, timeout=20) as r:
+            return json.loads(r.read().decode())
+    raise RuntimeError("LEDGER_SCRIPT_URL not configured — set this env var in Railway")
+
+def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
+    """Sync one ledger book from Google Sheet to Supabase. Returns (added, changed, errors)."""
+    import datetime
+
+    rows = _fetch_ledger_sheet(sheet_id, sheet_tab)
+    if not rows or len(rows) < 2:
+        return 0, 0, 0
+
+    # Fetch existing entries for this book
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/ledger_entries?person_id=eq.{person_id}&book_id=eq.{book_id}&select=id,row_index,debit_desc,credit_desc,balance",
+        headers=SB_HEADERS
+    )
+    existing = {e["row_index"]: e for e in (r.json() if r.ok else [])}
+
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    added = changed = errors = 0
+
+    for i, row in enumerate(rows[1:], start=2):  # skip header row, 1-indexed
+        try:
+            # Flexible column mapping — adjust if sheet layout differs
+            def cell(idx, default=""):
+                return str(row[idx]).strip() if len(row) > idx and row[idx] not in (None, "") else default
+
+            debit_desc   = cell(0)
+            debit_amount = cell(1, "0").replace(",", "") or "0"
+            credit_desc  = cell(2)
+            credit_amt   = cell(3, "0").replace(",", "") or "0"
+            balance      = cell(4, "0").replace(",", "") or "0"
+
+            try: debit_amount = float(debit_amount)
+            except: debit_amount = 0.0
+            try: credit_amt = float(credit_amt)
+            except: credit_amt = 0.0
+            try: balance = float(balance)
+            except: balance = 0.0
+
+            # Skip completely empty rows
+            if debit_amount == 0 and credit_amt == 0 and not debit_desc and not credit_desc:
+                continue
+
+            entry = {
+                "person_id":     person_id,
+                "book_id":       book_id,
+                "row_index":     i,
+                "debit_desc":    debit_desc or None,
+                "debit_amount":  debit_amount,
+                "credit_desc":   credit_desc or None,
+                "credit_amount": credit_amt,
+                "balance":       balance,
+                "last_synced_at": now,
+            }
+
+            if i not in existing:
+                # New row — insert and mark is_new
+                entry["first_synced_at"] = now
+                entry["is_new"] = True
+                r2 = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/ledger_entries",
+                    headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                    json=entry
+                )
+                if r2.ok: added += 1
+                else: errors += 1
+            else:
+                # Existing row — check if balance or desc changed
+                ex = existing[i]
+                if (abs(float(ex.get("balance") or 0) - balance) > 0.01 or
+                    (ex.get("debit_desc") or "") != debit_desc or
+                    (ex.get("credit_desc") or "") != credit_desc):
+                    entry["is_new"] = True  # changed row also flagged
+                    r2 = requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/ledger_entries?id=eq.{ex['id']}",
+                        headers={**SB_HEADERS, "Prefer": "return=minimal"},
+                        json=entry
+                    )
+                    if r2.ok: changed += 1
+                    else: errors += 1
+        except Exception as e:
+            logger.warning(f"Ledger sync row {i} error: {e}")
+            errors += 1
+
+    # Log the sync
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/ledger_sync_log",
+        headers={**SB_HEADERS, "Prefer": "return=minimal"},
+        json={
+            "person_id":        person_id,
+            "synced_at":        now,
+            "added_count":      added,
+            "changed_count":    changed,
+            "deleted_count":    0,
+            "math_error_count": errors,
+        }
+    )
+    return added, changed, errors
+
+
+@flask_app.route("/api/ledger/sync", methods=["POST", "GET"])
+def api_ledger_sync():
+    """Sync all active PKR ledger books from Google Sheets.
+    Called by Railway cron every 5 days: POST /api/ledger/sync
+    Can also be triggered manually from the app or via GET for testing.
+    """
+    try:
+        # Fetch all active people with a sheet_id
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/ledger_people?active=eq.true&sheet_id=not.is.null",
+            headers=SB_HEADERS
+        )
+        people = r.json() if r.ok else []
+
+        total_added = total_changed = total_errors = 0
+        results = []
+
+        for person in people:
+            # Fetch their books
+            rb = requests.get(
+                f"{SUPABASE_URL}/rest/v1/ledger_books?person_id=eq.{person['id']}&order=sort_order",
+                headers=SB_HEADERS
+            )
+            books = rb.json() if rb.ok else []
+
+            for book in books:
+                # Only sync PKR (the sheet-backed one) — AED was a one-time import
+                if book.get("currency") != "PKR":
+                    continue
+                try:
+                    added, changed, errors = _sync_ledger_book(
+                        person_id=person["id"],
+                        book_id=book["id"],
+                        sheet_id=person["sheet_id"],
+                        sheet_tab=book.get("sheet_tab", "Sheet1"),
+                        currency="PKR"
+                    )
+                    total_added += added
+                    total_changed += changed
+                    total_errors += errors
+                    results.append({
+                        "person": person["display_name"],
+                        "book": book["label"],
+                        "added": added,
+                        "changed": changed,
+                        "errors": errors
+                    })
+                except Exception as e:
+                    logger.error(f"Ledger sync failed for {person['display_name']}: {e}")
+                    results.append({
+                        "person": person["display_name"],
+                        "book": book.get("label"),
+                        "error": str(e)
+                    })
+
+        return jsonify({
+            "status": "ok",
+            "total_added": total_added,
+            "total_changed": total_changed,
+            "total_errors": total_errors,
+            "results": results
+        })
+
+    except Exception as e:
+        logger.error(f"Ledger sync error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route("/api/ledger/clear-new/<int:person_id>", methods=["POST"])
+def api_ledger_clear_new(person_id):
+    """Mark all is_new=true entries for a person as seen (is_new=false).
+    Called by the frontend after the user has viewed the new entries.
+    """
+    try:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/ledger_entries?person_id=eq.{person_id}&is_new=eq.true",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            json={"is_new": False}
+        )
+        if r.ok:
+            return jsonify({"status": "ok"})
+        return jsonify({"error": r.text}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)

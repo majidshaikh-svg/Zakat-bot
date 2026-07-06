@@ -1,0 +1,14 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "cronJobs": [
+      {
+        "name": "ledger-sync",
+        "schedule": "0 6 */5 * *",
+        "command": "curl -s -X POST http://localhost:$PORT/api/ledger/sync"
+      }
+    ]
+  }
+}
