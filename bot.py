@@ -2272,7 +2272,6 @@ def api_cards_migrate_old():
 # Sheet format: col A=Date, B=Debit desc, C=Debit amt, D=Credit desc, E=Credit amt, F=Balance
 # (or whatever the actual column order is — adjust COLS below if needed)
 
-LEDGER_SCRIPT_URL = os.environ.get("LEDGER_SCRIPT_URL", "")  # separate Apps Script for ledger sheet
 
 def _fetch_ledger_sheet(sheet_id, sheet_tab):
     """Fetch ledger sheet rows via Google Sheets API using service account."""
