@@ -2593,6 +2593,7 @@ def api_ledger_sync():
 
             for book in books:
                 # Sync all books — both PKR and AED
+                try:
                     added, already_known, errors, sync_log_id = _sync_ledger_book(
                         person_id=person["id"],
                         book_id=book["id"],
