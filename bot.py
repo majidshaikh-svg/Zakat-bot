@@ -2657,10 +2657,40 @@ def run_flask():
     port=int(os.environ.get("PORT",8080))
     flask_app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
 
+def _run_ledger_sync_job():
+    """Background job — runs ledger sync every 5 days automatically."""
+    logger.info("Scheduled ledger sync starting...")
+    try:
+        with flask_app.app_context() if hasattr(flask_app, 'app_context') else __import__('contextlib').nullcontext():
+            r = requests.get(f"http://localhost:{int(os.environ.get('PORT', 8080))}/api/ledger/sync", timeout=60)
+            logger.info(f"Scheduled ledger sync complete: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"Scheduled ledger sync failed: {e}")
+
+
 def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask API started")
+
+    # ── Ledger auto-sync every 5 days ──────────────────────────────────────────
+    # Runs inside the app — no Railway cron or manual triggers needed.
+    # Waits 60s after startup for Flask to be ready, then syncs every 5 days.
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(
+            _run_ledger_sync_job,
+            trigger='interval',
+            days=5,
+            id='ledger_sync',
+            replace_existing=True,
+        )
+        scheduler.start()
+        logger.info("Ledger auto-sync scheduler started — runs every 5 days")
+    except ImportError:
+        logger.warning("APScheduler not installed — ledger auto-sync disabled. Add apscheduler to requirements.txt")
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balances", balances_cmd))
