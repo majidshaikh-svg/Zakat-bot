@@ -1578,7 +1578,7 @@ def insights_status():
 # SUPABASE CONFIG — for Cards module
 # ══════════════════════════════════════════════════════
 SUPABASE_URL     = "https://flpzqovnyrlgnahnlimh.supabase.co"
-SUPABASE_SERVICE = "REMOVED_SECRET"
+SUPABASE_SERVICE = os.environ.get("SUPABASE_SERVICE_KEY", "")
 SB_HEADERS = {
     "apikey": SUPABASE_SERVICE,
     "Authorization": f"Bearer {SUPABASE_SERVICE}",
