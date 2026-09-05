@@ -1734,6 +1734,13 @@ def api_cards_upload():
                 json=txn_rows)
             if not tr.ok:
                 logger.error(f"Transactions save error: {tr.text}")
+                r = jsonify({
+                    "error": f"Statement saved, but transactions failed to save: {tr.text}",
+                    "statement_id": stmt_id,
+                    "transactions_saved": 0,
+                })
+                r.headers["Access-Control-Allow-Origin"] = "*"
+                return r, 500
 
         r = jsonify({
             "success": True,
