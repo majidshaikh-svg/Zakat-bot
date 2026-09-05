@@ -1703,9 +1703,11 @@ def api_cards_upload():
             "payment_due_date": due_date, "minimum_due": min_due,
             "total_spend": total_spend, "total_credits": total_credits
         }
-        # Use upsert
+        # Use upsert - on_conflict must match the real unique constraint
+        # (card_statements_bank_statement_month_key) or PostgREST falls back
+        # to a plain insert and fails on duplicates instead of updating.
         headers_upsert = {**SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
-        sr = requests.post(f"{SUPABASE_URL}/rest/v1/card_statements",
+        sr = requests.post(f"{SUPABASE_URL}/rest/v1/card_statements?on_conflict=bank,statement_month",
             headers=headers_upsert, json=stmt_data)
         if not sr.ok:
             return jsonify({"error": f"Statement save failed: {sr.text}"}), 500
