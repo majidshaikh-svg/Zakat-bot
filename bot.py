@@ -1803,14 +1803,22 @@ def api_cards_analyse():
         if not stmts:
             return jsonify({"error": "Statement not found"}), 404
         stmt = stmts[0]
+        # Supabase returns numeric columns as JSON strings - cast before any
+        # arithmetic/formatting, or every operation below raises a TypeError.
+        for _k in ("closing_balance", "total_spend", "minimum_due", "total_credits"):
+            stmt[_k] = float(stmt.get(_k) or 0)
 
         # Fetch transactions for this statement
         txns = sb_get("card_transactions",
             f"statement_id=eq.{statement_id}&order=amount.desc")
+        for t in txns:
+            t["amount"] = float(t.get("amount") or 0)
 
         # Fetch previous month for comparison
         prev_txns = sb_get("card_transactions",
             f"bank=eq.{bank}&order=date.desc&limit=200")
+        for t in prev_txns:
+            t["amount"] = float(t.get("amount") or 0)
 
         # Format for Claude
         today_str = time.strftime("%d %B %Y")
