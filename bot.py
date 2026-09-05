@@ -13,7 +13,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")  # optional — Telegram bot service is no longer used; app runs fine without it
-CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
+CLAUDE_API_KEY  = os.environ.get("CLAUDE_API_KEY")  # optional at startup — missing key fails only when an AI feature is actually used, not at container start
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbyTmnzrtla5mJ9raKbFETWq58yz25mwLQwsW0BFbmBuSg3Qrvb27MHW3gn1F38dBYAS/exec"
 LEDGER_SCRIPT_URL  = os.environ.get("LEDGER_SCRIPT_URL", SCRIPT_URL)
