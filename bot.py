@@ -12,7 +12,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")  # optional — Telegram bot service is no longer used; app runs fine without it
 CLAUDE_API_KEY  = os.environ["CLAUDE_API_KEY"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 SCRIPT_URL         = "https://script.google.com/macros/s/AKfycbyTmnzrtla5mJ9raKbFETWq58yz25mwLQwsW0BFbmBuSg3Qrvb27MHW3gn1F38dBYAS/exec"
@@ -2698,10 +2698,6 @@ def _run_ledger_sync_job():
 
 
 def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask API started")
-
     # ── Ledger auto-sync every 5 days ──────────────────────────────────────────
     # Runs inside the app — no Railway cron or manual triggers needed.
     # Waits 60s after startup for Flask to be ready, then syncs every 5 days.
@@ -2722,14 +2718,24 @@ def main():
     except ImportError:
         logger.warning("APScheduler not installed — ledger auto-sync disabled. Add apscheduler to requirements.txt")
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("balances", balances_cmd))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("Telegram bot started...")
-    app.run_polling()
+    # Telegram bot service is no longer used — hidden/disabled by default.
+    # Only starts if TELEGRAM_TOKEN is explicitly set in the environment.
+    if TELEGRAM_TOKEN:
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info("Flask API started")
+
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("balances", balances_cmd))
+        app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+        app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        logger.info("Telegram bot started...")
+        app.run_polling()
+    else:
+        logger.info("TELEGRAM_TOKEN not set — Telegram bot disabled, running Flask API + scheduler only")
+        run_flask()  # blocking — keeps the process alive; scheduler already running in its own background thread
 
 if __name__ == "__main__":
     main()
