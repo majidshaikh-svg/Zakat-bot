@@ -1652,7 +1652,9 @@ def api_cards_transactions():
             matching_stmts = sb_get("card_statements", "&".join(stmt_params))
             stmt_ids = [s["id"] for s in matching_stmts] if isinstance(matching_stmts, list) else []
             if not stmt_ids:
-                return jsonify([])
+                r = jsonify([])
+                r.headers["Access-Control-Allow-Origin"] = "*"
+                return r, 200
             params.append(f"statement_id=in.({','.join(stmt_ids)})")
         if bank:     params.append(f"bank=eq.{bank}")
         if category: params.append(f"category=eq.{category}")
