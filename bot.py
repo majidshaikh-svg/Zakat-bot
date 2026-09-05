@@ -1959,7 +1959,18 @@ def api_cards_search():
 
         # Fetch relevant transactions
         params = ["order=date.desc", "limit=200"]
-        if month: params.append(f"statement_month=eq.{month}")
+        if month:
+            # Same fix as /api/cards/transactions - derive from card_statements
+            # (source of truth), not the potentially-stale copy on each row.
+            stmt_params = [f"statement_month=eq.{month}", "select=id"]
+            if bank: stmt_params.append(f"bank=eq.{bank}")
+            matching_stmts = sb_get("card_statements", "&".join(stmt_params))
+            stmt_ids = [s["id"] for s in matching_stmts] if isinstance(matching_stmts, list) else []
+            if not stmt_ids:
+                r = jsonify({"answer": "No transactions found.", "transactions": []})
+                r.headers["Access-Control-Allow-Origin"] = "*"
+                return r, 200
+            params.append(f"statement_id=in.({','.join(stmt_ids)})")
         if bank:  params.append(f"bank=eq.{bank}")
         txns = sb_get("card_transactions", "&".join(params))
 
@@ -1967,6 +1978,10 @@ def api_cards_search():
             r = jsonify({"answer": "No transactions found.", "transactions": []})
             r.headers["Access-Control-Allow-Origin"] = "*"
             return r, 200
+
+        # Supabase returns numeric columns as JSON strings - cast before formatting
+        for t in txns:
+            t["amount"] = float(t.get("amount") or 0)
 
         txn_lines = [
             f"[{i}] {t['date']} | {t['description']} | AED {t['amount']:.0f} | {t['category']} | {t['bank']} {t['last4']}"
