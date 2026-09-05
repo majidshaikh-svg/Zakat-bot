@@ -1642,7 +1642,18 @@ def api_cards_transactions():
         ey_only  = request.args.get("ey_only", "false")
 
         params = ["order=date.desc", f"limit={limit}"]
-        if month:    params.append(f"statement_month=eq.{month}")
+        if month:
+            # Derive statement_id(s) from card_statements (the source of truth for
+            # month) instead of trusting card_transactions.statement_month, which
+            # is a copy made at insert time and can go stale if a statement's
+            # month is corrected later without also updating its transactions.
+            stmt_params = [f"statement_month=eq.{month}", "select=id"]
+            if bank: stmt_params.append(f"bank=eq.{bank}")
+            matching_stmts = sb_get("card_statements", "&".join(stmt_params))
+            stmt_ids = [s["id"] for s in matching_stmts] if isinstance(matching_stmts, list) else []
+            if not stmt_ids:
+                return jsonify([])
+            params.append(f"statement_id=in.({','.join(stmt_ids)})")
         if bank:     params.append(f"bank=eq.{bank}")
         if category: params.append(f"category=eq.{category}")
         if ey_only == "true": params.append("is_ey_reimbursable=eq.true")
