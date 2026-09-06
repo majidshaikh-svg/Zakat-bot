@@ -2323,7 +2323,7 @@ def _fetch_ledger_sheet(sheet_id, sheet_tab):
     import urllib.parse
     # Use Apps Script URL if configured, else fall back to Sheets API
     if LEDGER_SCRIPT_URL:
-        url = f"{LEDGER_SCRIPT_URL}?sheet_id={urllib.parse.quote(sheet_id)}&tab={urllib.parse.quote(sheet_tab)}&t={int(time.time())}"
+        url = f"{LEDGER_SCRIPT_URL}?action=ledger&sheet_id={urllib.parse.quote(sheet_id)}&tab={urllib.parse.quote(sheet_tab)}&t={int(time.time())}"
         with urllib.request.urlopen(url, timeout=20) as r:
             return json.loads(r.read().decode())
     raise RuntimeError("LEDGER_SCRIPT_URL not configured — set this env var in Railway")
