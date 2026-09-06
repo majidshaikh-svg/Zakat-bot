@@ -2755,13 +2755,13 @@ def main():
         scheduler.add_job(
             _run_ledger_sync_job,
             trigger='interval',
-            days=5,
+            days=1,
             id='ledger_sync',
             replace_existing=True,
             next_run_time=datetime.datetime.now() + datetime.timedelta(seconds=60),
         )
         scheduler.start()
-        logger.info("Ledger auto-sync scheduler started — first run in 60s, then every 5 days")
+        logger.info("Ledger auto-sync scheduler started — first run in 60s, then every 1 day")
     except ImportError:
         logger.warning("APScheduler not installed — ledger auto-sync disabled. Add apscheduler to requirements.txt")
 
