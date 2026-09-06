@@ -2380,6 +2380,7 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
     sync_log_id = (log_r.json() or [{}])[0].get("id") if log_r.ok else None
 
     added = already_known = errors = 0
+    error_samples = []  # capture real diagnostic detail instead of just a count
 
     for i, row in enumerate(rows[1:], start=2):
         try:
@@ -2473,17 +2474,25 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
             else:
                 logger.warning(f"Pending insert failed row {i}: {pr.text}")
                 errors += 1
+                if len(error_samples) < 10:
+                    error_samples.append({"row": i, "raw_row": row, "error": f"insert failed: {pr.text}"})
 
         except Exception as e:
             logger.warning(f"Ledger sync row {i} error: {e}")
             errors += 1
+            if len(error_samples) < 10:
+                error_samples.append({"row": i, "raw_row": row, "error": str(e)})
 
     # Update the sync log with final counts
     if sync_log_id:
         requests.patch(
             f"{SUPABASE_URL}/rest/v1/ledger_sync_log?id=eq.{sync_log_id}",
             headers={**SB_HEADERS, "Prefer": "return=minimal"},
-            json={"added_count": added, "math_error_count": errors}
+            json={
+                "added_count": added,
+                "math_error_count": errors,
+                "details_json": {"error_samples": error_samples} if error_samples else None,
+            }
         )
 
     return added, already_known, errors, sync_log_id
