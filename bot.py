@@ -2683,7 +2683,9 @@ def api_ledger_pending_dismiss(pending_id):
             headers={**SB_HEADERS, "Prefer": "return=minimal"},
             json={"status": "dismissed", "dismissed_at": now}
         )
-        return jsonify({"status": "ok"}) if r.ok else jsonify({"error": r.text}), 500
+        if r.ok:
+            return jsonify({"status": "ok"}), 200
+        return jsonify({"error": r.text}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2712,7 +2714,9 @@ def api_ledger_pending_match(pending_id, entry_id):
                 "matched_by":        "manual",
             }
         )
-        return jsonify({"status": "ok"}) if r2.ok else jsonify({"error": r2.text}), 500
+        if r2.ok:
+            return jsonify({"status": "ok"}), 200
+        return jsonify({"error": r2.text}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2725,7 +2729,9 @@ def api_ledger_pending_delete(pending_id):
             f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
             headers={**SB_HEADERS, "Prefer": "return=minimal"}
         )
-        return jsonify({"status": "ok"}) if r.ok else jsonify({"error": r.text}), 500
+        if r.ok:
+            return jsonify({"status": "ok"}), 200
+        return jsonify({"error": r.text}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
