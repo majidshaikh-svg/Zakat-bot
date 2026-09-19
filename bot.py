@@ -1132,6 +1132,115 @@ def api_save_bulk():
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
 
+@flask_app.route("/api/trips", methods=["GET", "POST"])
+def api_trips():
+    if request.method == "GET":
+        trips = sb_get("trips", "order=start_date.desc")
+        for t in (trips or []):
+            expenses = sb_get("trip_expenses", f"trip_id=eq.{t['id']}&select=amount")
+            t["total_spend"] = sum(float(e.get("amount") or 0) for e in (expenses or []))
+        r = jsonify(trips or [])
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    data = request.get_json()
+    name = data.get("name", "").strip()
+    start_date = data.get("start_date", "")
+    if not name or not start_date:
+        return jsonify({"error": "name and start_date are required"}), 400
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/trips",
+        headers={**SB_HEADERS, "Prefer": "return=representation"},
+        json={"name": name, "start_date": start_date, "end_date": data.get("end_date")}
+    )
+    if not r.ok:
+        return jsonify({"error": r.text}), 500
+    r2 = jsonify(r.json()[0])
+    r2.headers["Access-Control-Allow-Origin"] = "*"
+    return r2, 200
+
+
+@flask_app.route("/api/trips/parse-table", methods=["POST"])
+def api_trips_parse_table():
+    """Parse a pasted table (text) or photo into Cash Received + Expenses,
+    classifying every expense as Personal, Khair, Zakat, or Asanee - never blank.
+    Dates default to the trip's own start date when not stated in the source."""
+    try:
+        data = request.get_json()
+        text = data.get("text", "")
+        img_b64 = data.get("image_b64", None)
+        trip_start_date = data.get("trip_start_date", "")
+
+        system = f"""You are extracting trip financial records from a pasted table or photo.
+
+Return ONLY valid JSON (no markdown, no preamble) in this exact shape:
+{{"cash_received": [{{"date":"","description":"","amount":0}}],
+  "expenses": [{{"date":"","description":"","amount":0,"payment_method":"","expense_type":""}}]}}
+
+Rules:
+- "Cash Received" / "Opening cash" / funding rows go in cash_received, never in expenses.
+- Every expense MUST have expense_type set to exactly one of: "Personal", "Khair", "Zakat", "Asanee".
+  If the row has no charity marking at all, use "Personal" - never leave it blank.
+- payment_method must be exactly one of: "Cash", "Credit Card", "Bank Transfer".
+- date format: YYYY-MM-DD. If no date is given for a row, use this trip's start date: {trip_start_date}
+- Do not invent rows. Do not skip rows. Preserve every row from the source."""
+
+        content = []
+        if img_b64:
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}})
+        content.append({"type": "text", "text": text})
+
+        r = client.messages.create(model="claude-sonnet-4-6", max_tokens=2000,
+            system=system, messages=[{"role": "user", "content": content}])
+        raw = r.content[0].text.strip()
+        raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
+        parsed = json.loads(raw)
+
+        r2 = jsonify(parsed)
+        r2.headers["Access-Control-Allow-Origin"] = "*"
+        return r2, 200
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
+@flask_app.route("/api/trips/<trip_id>/import", methods=["POST"])
+def api_trips_import(trip_id):
+    """Bulk-insert confirmed (and possibly user-edited) Cash Received + Expenses
+    for one trip, after the review screen."""
+    try:
+        data = request.get_json()
+        cash_received = data.get("cash_received", [])
+        expenses = data.get("expenses", [])
+
+        if cash_received:
+            rows = [{"trip_id": trip_id, "date": c["date"], "description": c["description"], "amount": c["amount"]} for c in cash_received]
+            r = requests.post(f"{SUPABASE_URL}/rest/v1/trip_cash_received",
+                headers={**SB_HEADERS, "Prefer": "return=minimal"}, json=rows)
+            if not r.ok:
+                return jsonify({"error": f"Failed to save cash received: {r.text}"}), 500
+
+        if expenses:
+            rows = [{
+                "trip_id": trip_id, "date": e["date"], "description": e["description"],
+                "amount": e["amount"], "payment_method": e["payment_method"],
+                "expense_type": e["expense_type"],
+                "charity_status": "pending" if e["expense_type"] != "Personal" else None,
+            } for e in expenses]
+            r = requests.post(f"{SUPABASE_URL}/rest/v1/trip_expenses",
+                headers={**SB_HEADERS, "Prefer": "return=minimal"}, json=rows)
+            if not r.ok:
+                return jsonify({"error": f"Failed to save expenses: {r.text}"}), 500
+
+        r3 = jsonify({"success": True, "cash_received_count": len(cash_received), "expenses_count": len(expenses)})
+        r3.headers["Access-Control-Allow-Origin"] = "*"
+        return r3, 200
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
 @flask_app.route("/api/upload-image", methods=["POST"])
 def api_upload_image():
     """Generic Drive upload, reusable by anything that needs to store a screenshot —
