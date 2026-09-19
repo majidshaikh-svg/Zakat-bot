@@ -2545,7 +2545,8 @@ def api_ledger_pending_approve(pending_id):
                 "balance":        balance,
                 "first_synced_at": now,
                 "last_synced_at":  now,
-                "category":       p.get("category"),
+                "credit_category": p.get("category") if credit_desc else None,
+                "debit_category":  p.get("category") if debit_desc else None,
             }
         )
         if not entry_r.ok:
