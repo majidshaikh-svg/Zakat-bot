@@ -2436,8 +2436,20 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
             amount     = credit_amt  if is_credit else debit_amt
             # Try to detect date from description
             import re
-            date_match = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b', desc or "")
-            detected_date = date_match.group(1) if date_match else None
+            detected_date = None
+            iso_match = re.search(r'\b(\d{4})-(\d{2})-(\d{2})\b', desc or "")
+            dmy_match = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b', desc or "")
+            try:
+                if iso_match:
+                    y, m, d = int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3))
+                    detected_date = datetime.date(y, m, d).isoformat()
+                elif dmy_match:
+                    d, m, y = int(dmy_match.group(1)), int(dmy_match.group(2)), int(dmy_match.group(3))
+                    if y < 100:
+                        y += 2000
+                    detected_date = datetime.date(y, m, d).isoformat()
+            except ValueError:
+                detected_date = None  # invalid/out-of-range date in text - safer to omit than send garbage
 
             # Auto-match: look for a manual pending entry with the same amount
             suggested_match_id = None
