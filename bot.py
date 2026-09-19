@@ -2510,6 +2510,60 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
     return added, already_known, errors, sync_log_id
 
 
+@flask_app.route("/api/ledger/verify-balance/<int:book_id>", methods=["GET"])
+def api_ledger_verify_balance(book_id):
+    """Read-only check: does our stored balance match the live sheet's own stated
+    balance? PKR only - the AED sheet has no per-row running total to compare against."""
+    try:
+        books = sb_get("ledger_books", f"id=eq.{book_id}")
+        if not books:
+            return jsonify({"error": "Book not found"}), 404
+        book = books[0]
+
+        if book.get("currency") != "PKR":
+            return jsonify({"checked": False, "reason": "Verification only supported for PKR (AED sheet has no stated running balance)"})
+
+        people = sb_get("ledger_people", f"id=eq.{book['person_id']}")
+        if not people:
+            return jsonify({"error": "Person not found"}), 404
+        sheet_id = people[0].get("sheet_id")
+
+        rows = _fetch_ledger_sheet(sheet_id, book["sheet_tab"])
+        if not rows or len(rows) < 2:
+            return jsonify({"checked": False, "reason": "Could not read sheet"})
+
+        def cell(row, idx, default=""):
+            return str(row[idx]).strip() if len(row) > idx and row[idx] not in (None, "") else default
+
+        sheet_balance = None
+        for row in reversed(rows[1:]):
+            raw = cell(row, 4, "")
+            if raw:
+                try:
+                    sheet_balance = float(raw.replace(",", ""))
+                    break
+                except ValueError:
+                    continue
+        if sheet_balance is None:
+            return jsonify({"checked": False, "reason": "No balance value found in sheet"})
+
+        app_entries = sb_get("ledger_entries", f"book_id=eq.{book_id}&order=row_index.desc&limit=1&select=balance")
+        app_balance = float(app_entries[0]["balance"]) if app_entries else 0.0
+
+        r = jsonify({
+            "checked": True,
+            "matches": abs(app_balance - sheet_balance) < 1,
+            "app_balance": app_balance,
+            "sheet_balance": sheet_balance,
+        })
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        r = jsonify({"checked": False, "error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+
+
 @flask_app.route("/api/ledger/pending/<int:pending_id>/approve", methods=["POST"])
 def api_ledger_pending_approve(pending_id):
     """Approve a sync pending entry — move it to ledger_entries as a confirmed transaction."""
