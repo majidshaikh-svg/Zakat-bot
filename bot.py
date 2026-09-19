@@ -2513,15 +2513,15 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
 @flask_app.route("/api/ledger/verify-balance/<int:book_id>", methods=["GET"])
 def api_ledger_verify_balance(book_id):
     """Read-only check: does our stored balance match the live sheet's own stated
-    balance? PKR only - the AED sheet has no per-row running total to compare against."""
+    balance? PKR reads the per-row running balance (column E). AED has no per-row
+    balance, but does have a labeled 'Balance' summary row at the end of the sheet -
+    we sum our own entries and compare against that stated value instead."""
     try:
         books = sb_get("ledger_books", f"id=eq.{book_id}")
         if not books:
             return jsonify({"error": "Book not found"}), 404
         book = books[0]
-
-        if book.get("currency") != "PKR":
-            return jsonify({"checked": False, "reason": "Verification only supported for PKR (AED sheet has no stated running balance)"})
+        currency = book.get("currency")
 
         people = sb_get("ledger_people", f"id=eq.{book['person_id']}")
         if not people:
@@ -2536,19 +2536,38 @@ def api_ledger_verify_balance(book_id):
             return str(row[idx]).strip() if len(row) > idx and row[idx] not in (None, "") else default
 
         sheet_balance = None
-        for row in reversed(rows[1:]):
-            raw = cell(row, 4, "")
-            if raw:
-                try:
-                    sheet_balance = float(raw.replace(",", ""))
-                    break
-                except ValueError:
-                    continue
-        if sheet_balance is None:
-            return jsonify({"checked": False, "reason": "No balance value found in sheet"})
 
-        app_entries = sb_get("ledger_entries", f"book_id=eq.{book_id}&order=row_index.desc&limit=1&select=balance")
-        app_balance = float(app_entries[0]["balance"]) if app_entries else 0.0
+        if currency == "PKR":
+            for row in reversed(rows[1:]):
+                raw = cell(row, 4, "")
+                if raw:
+                    try:
+                        sheet_balance = float(raw.replace(",", ""))
+                        break
+                    except ValueError:
+                        continue
+        elif currency == "AED":
+            for row in reversed(rows[1:]):
+                if cell(row, 0, "").strip().lower() == "balance":
+                    raw = cell(row, 1, "")
+                    try:
+                        sheet_balance = float(raw.replace(",", ""))
+                    except ValueError:
+                        sheet_balance = None
+                    break
+        else:
+            return jsonify({"checked": False, "reason": f"Verification not supported for currency: {currency}"})
+
+        if sheet_balance is None:
+            return jsonify({"checked": False, "reason": "No stated balance found in sheet"})
+
+        if currency == "PKR":
+            app_entries = sb_get("ledger_entries", f"book_id=eq.{book_id}&order=row_index.desc&limit=1&select=balance")
+            app_balance = float(app_entries[0]["balance"]) if app_entries else 0.0
+        else:
+            # AED has no per-row balance - sum every approved entry ourselves
+            all_entries = sb_get("ledger_entries", f"book_id=eq.{book_id}&select=credit_amount,debit_amount")
+            app_balance = sum(float(e.get("credit_amount") or 0) - float(e.get("debit_amount") or 0) for e in (all_entries or []))
 
         r = jsonify({
             "checked": True,
