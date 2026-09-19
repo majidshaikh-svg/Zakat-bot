@@ -1101,6 +1101,9 @@ def api_analyze_bulk():
         if not entries or "error" in entries[0]:
             return jsonify({"error": entries[0].get("error", "unknown") if entries else "unknown"}), 400
 
+        if len(entries) > 10:
+            return jsonify({"error": f"Found {len(entries)} entries — please limit to 10 per upload. Split into smaller batches and try again."}), 400
+
         dup = check_duplicates(entries, rows)
         for i, e in enumerate(entries):
             e["confidence"] = 78 if dup else 92
