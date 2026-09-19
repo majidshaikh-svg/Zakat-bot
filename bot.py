@@ -1082,6 +1082,53 @@ def api_analyze():
     except Exception as ex:
         return jsonify({"error":str(ex)}),500
 
+@flask_app.route("/api/analyze/bulk", methods=["POST"])
+def api_analyze_bulk():
+    """Same extraction as /api/analyze, but returns every entry found instead of
+    just the first - extract() already returns a full list, this just uses it."""
+    try:
+        data = request.get_json()
+        text = data.get("text", "")
+        img_b64 = data.get("image_b64", None)
+
+        rows = get_rows()
+        recent_parts = []
+        for r in rows[-10:]:
+            if len(r) < 4: continue
+            if str(r[0]).startswith("TXN-"): recent_parts.append(f"{r[1]}|{r[2]}|{r[4]}|{r[5] if len(r)>5 else ''}")
+            else: recent_parts.append(f"{r[0]}|{r[1]}|{r[3]}|{r[4] if len(r)>4 else ''}")
+        entries = extract(text, img_b64=img_b64, recent="\n".join(recent_parts))
+        if not entries or "error" in entries[0]:
+            return jsonify({"error": entries[0].get("error", "unknown") if entries else "unknown"}), 400
+
+        dup = check_duplicates(entries, rows)
+        for i, e in enumerate(entries):
+            e["confidence"] = 78 if dup else 92
+        return jsonify({"entries": entries})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+@flask_app.route("/api/save/bulk", methods=["POST"])
+def api_save_bulk():
+    """Save multiple confirmed entries in one call, reusing the same append_entry
+    used by the single-entry save endpoint."""
+    try:
+        data = request.get_json()
+        entries = data.get("entries", [])
+        if not entries:
+            return jsonify({"error": "No entries provided"}), 400
+        saved = []
+        for e in entries:
+            date = e.get("date", time.strftime("%d-%b-%y"))
+            amount = e.get("amount", 0)
+            category = e.get("category", "Zakat")
+            details = clean_details(e.get("details", ""), amount, category)
+            txn_id, row = append_entry(date, amount, category, details, input_type="bulk")
+            saved.append({"txn_id": txn_id, "row": row})
+        return jsonify({"success": True, "saved": saved, "balances": get_balances()})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
 @flask_app.route("/api/upload-image", methods=["POST"])
 def api_upload_image():
     """Generic Drive upload, reusable by anything that needs to store a screenshot —
