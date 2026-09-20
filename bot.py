@@ -2712,6 +2712,137 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
     return added, already_known, errors, sync_log_id
 
 
+
+@flask_app.route("/api/ledger/charity-audit/<int:book_id>", methods=["GET"])
+def api_ledger_charity_audit(book_id):
+    """Read-only audit of the latest 20 PKR debit transactions against Charity Google Sheet."""
+    try:
+        books = sb_get("ledger_books", f"id=eq.{book_id}")
+        if not books:
+            return jsonify({"error": "Book not found"}), 404
+        book = books[0]
+        if (book.get("currency") or "").upper() != "PKR":
+            return jsonify({"error": "Charity audit is currently available for PKR only"}), 400
+
+        ledger = sb_get("ledger_entries", f"book_id=eq.{book_id}&debit_amount=gt.0&order=row_index.desc&limit=20&select=id,row_index,debit_date,debit_desc,debit_amount,debit_category,debit_sub_type,charity_status,charity_txn_id")
+        rows = get_rows()
+        charity = []
+        for sheet_row, row in enumerate(rows[1:], start=2):
+            if len(row) < 5:
+                continue
+            e = row_to_entry(row)
+            if not e:
+                continue
+            e["sheet_row"] = sheet_row
+            e["reference"] = e.get("txn_id") or f"ROW-{sheet_row}"
+            charity.append(e)
+
+        audit, claude_jobs = [], []
+        for e in ledger:
+            amount = float(e.get("debit_amount") or 0)
+            base = {"ledger_entry_id": e["id"], "row_index": e.get("row_index"), "description": e.get("debit_desc") or "", "amount": amount, "category": e.get("debit_category"), "sub_category": e.get("debit_sub_type"), "reference": None, "match": None}
+            existing_ref = e.get("charity_txn_id")
+            status = e.get("charity_status") or "none"
+            if existing_ref:
+                audit.append({**base, "state": "linked", "reference": existing_ref})
+                continue
+            if status == "dismissed":
+                audit.append({**base, "state": "excluded"})
+                continue
+            if status == "mismatch":
+                audit.append({**base, "state": "mismatch"})
+                continue
+
+            item = {**base, "state": "no_match"}
+            audit.append(item)
+            candidates = [x for x in charity if abs(float(x.get("amount") or 0) - amount) < 0.01]
+            if candidates:
+                claude_jobs.append({
+                    "ledger_entry_id": e["id"],
+                    "ledger": {"description": e.get("debit_desc") or "", "amount": amount, "category": e.get("debit_category") or "", "sub_category": e.get("debit_sub_type") or "", "date": e.get("debit_date") or ""},
+                    "candidates": [{"reference": x["reference"], "txn_id": x.get("txn_id") or "", "sheet_row": x["sheet_row"], "date": x.get("date") or "", "amount": x.get("amount"), "category": x.get("category") or "", "details": x.get("details") or ""} for x in candidates[:12]]
+                })
+
+        if claude_jobs:
+            prompt = """You reconcile personal Ledger expenses to an existing Charity ledger.
+For each Ledger item, choose a candidate ONLY when it is clearly the same real transaction.
+Amount is already exact. Use description, recipient/purpose, category/subcategory and date/period wording.
+Do not force a match merely because amounts are equal.
+Return JSON only: {"matches":[{"ledger_entry_id":123,"reference":"TXN-1 or ROW-10","confidence":"high|medium","reason":"brief"}]}.
+Omit any ledger item with no credible candidate.
+
+DATA:
+""" + json.dumps(claude_jobs, default=str)
+            try:
+                msg = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2500, messages=[{"role": "user", "content": prompt}])
+                raw = msg.content[0].text.strip()
+                if raw.startswith("~~~"):
+                    raw = raw.split("\n", 1)[1].rsplit("~~~", 1)[0].strip()
+                chosen = json.loads(raw).get("matches", [])
+                chosen_map = {int(x["ledger_entry_id"]): x for x in chosen if x.get("reference")}
+                candidate_map = {(j["ledger_entry_id"], x["reference"]): x for j in claude_jobs for x in j["candidates"]}
+                for item in audit:
+                    ch = chosen_map.get(int(item["ledger_entry_id"]))
+                    if not ch:
+                        continue
+                    candidate = candidate_map.get((item["ledger_entry_id"], ch["reference"]))
+                    if candidate:
+                        item["state"] = "match_found"
+                        item["reference"] = ch["reference"]
+                        item["match"] = {**candidate, "confidence": ch.get("confidence"), "reason": ch.get("reason")}
+            except Exception as ex:
+                logger.warning(f"Ledger Charity audit Claude matching failed: {ex}")
+
+        summary = {"total": len(audit)}
+        for state in ["match_found", "no_match", "linked", "excluded", "mismatch"]:
+            summary[state] = sum(1 for x in audit if x["state"] == state)
+        r = jsonify({"items": audit, "summary": summary})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        logger.exception("Ledger Charity audit failed")
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
+@flask_app.route("/api/ledger/charity-audit/<int:entry_id>/decision", methods=["POST", "OPTIONS"])
+def api_ledger_charity_audit_decision(entry_id):
+    """Persist an explicit human audit decision."""
+    if request.method == "OPTIONS":
+        r = jsonify({"ok": True})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        r.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        return r, 200
+    try:
+        data = request.get_json() or {}
+        decision = data.get("decision")
+        reference = (data.get("reference") or "").strip() or None
+        if decision == "confirm":
+            if not reference:
+                return jsonify({"error": "Reference is required to confirm a match"}), 400
+            patch = {"charity_status": "added", "charity_txn_id": reference}
+        elif decision == "exclude":
+            patch = {"charity_status": "dismissed", "charity_txn_id": None}
+        elif decision == "mismatch":
+            patch = {"charity_status": "mismatch", "charity_txn_id": None}
+        else:
+            return jsonify({"error": "Invalid decision"}), 400
+        import datetime
+        patch["charity_decided_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        ok = sb_patch("ledger_entries", f"id=eq.{entry_id}", patch)
+        if not ok:
+            return jsonify({"error": "Could not save audit decision"}), 500
+        r = jsonify({"status": "ok", **patch})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 200
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
 @flask_app.route("/api/ledger/verify-balance/<int:book_id>", methods=["GET"])
 def api_ledger_verify_balance(book_id):
     """Read-only check: does our stored balance match the live sheet's own stated
