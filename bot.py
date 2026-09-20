@@ -114,14 +114,49 @@ def rename_drive_file(drive_link, new_name):
         logger.error(f"Drive rename error: {e}")
 
 def get_balances():
+    """Read the Charity dashboard figures directly from the summary cells in
+    the 'Zakat & Khairat' sheet returned by Apps Script.
+
+    Summary layout (0-based indexes in the returned row array):
+      Khair:   total due M1=index 12, total paid M3, remaining M5
+      Zakat:   total due R1=index 17, total paid R3, remaining R5
+      Asanee:  total due W1=index 22, total paid W3, remaining W5
+
+    The legacy top-level numeric values remain for backward compatibility.
+    """
     rows = get_rows()
-    bal = {"Zakat": 0, "Khair": 0, "Asanee": 0}
-    try: bal["Khair"]  = float(str(rows[4][12]).replace(",","").replace(" ",""))
-    except: pass
-    try: bal["Zakat"]  = float(str(rows[4][17]).replace(",","").replace(" ",""))
-    except: pass
-    try: bal["Asanee"] = float(str(rows[4][22]).replace(",","").replace(" ",""))
-    except: pass
+
+    def num(row_i, col_i):
+        try:
+            return float(str(rows[row_i][col_i]).replace(",", "").replace(" ", ""))
+        except:
+            return 0.0
+
+    mapping = {
+        "Khair": 12,
+        "Zakat": 17,
+        "Asanee": 22,
+    }
+    bal, dashboard = {}, {}
+    for name, col in mapping.items():
+        total_due = num(0, col)
+        total_paid = num(2, col)
+        remaining = num(4, col)
+        # Remaining is the single source of truth for LEFT/AHEAD.
+        ahead = remaining < 0
+        progress = 100.0 if ahead else ((total_paid / total_due) * 100.0 if total_due > 0 else 0.0)
+        bal[name] = remaining
+        dashboard[name] = {
+            "remaining": remaining,
+            "status": "ahead" if ahead else "left",
+            "amount": abs(remaining),
+            "paid_pct": round(max(0.0, min(progress, 100.0)), 1),
+            "total_due": total_due,
+            "total_paid": total_paid,
+        }
+
+    bal["dashboard"] = dashboard
+    bal["currency"] = "PKR"
     return bal
 
 def get_rows():
