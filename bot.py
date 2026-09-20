@@ -1241,6 +1241,49 @@ def api_trips_import(trip_id):
         return r, 500
 
 
+@flask_app.route("/api/trips/expense/<expense_id>/link-charity", methods=["POST"])
+def api_trips_link_charity(expense_id):
+    """Phase 3: write a trip expense (Khair/Zakat/Asanee) into the real Charity
+    Sheet, then mark it linked. One expense, one Sheet row - never double-counted."""
+    try:
+        expenses = sb_get("trip_expenses", f"id=eq.{expense_id}")
+        if not expenses:
+            return jsonify({"error": "Expense not found"}), 404
+        expense = expenses[0]
+
+        if expense["expense_type"] == "Personal":
+            return jsonify({"error": "Personal expenses cannot be linked to Charity"}), 400
+        if expense.get("charity_status") == "linked":
+            return jsonify({"error": "Already linked to Charity"}), 400
+
+        trips = sb_get("trips", f"id=eq.{expense['trip_id']}")
+        trip_name = trips[0]["name"] if trips else "Trip"
+
+        details = f"{expense['description']} (from Trip: {trip_name})"
+        txn_id, row = append_entry(
+            date=expense["date"], amount=expense["amount"],
+            category=expense["expense_type"], details=details, input_type="trip_import"
+        )
+        if not txn_id:
+            return jsonify({"error": "Failed to write to Charity sheet"}), 500
+
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/trip_expenses?id=eq.{expense_id}",
+            headers={**SB_HEADERS, "Prefer": "return=minimal"},
+            json={"charity_status": "linked", "charity_link_id": txn_id}
+        )
+        if not r.ok:
+            return jsonify({"error": f"Linked to Charity, but failed to update trip record: {r.text}"}), 500
+
+        r2 = jsonify({"success": True, "txn_id": txn_id})
+        r2.headers["Access-Control-Allow-Origin"] = "*"
+        return r2, 200
+    except Exception as e:
+        r = jsonify({"error": str(e)})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 500
+
+
 @flask_app.route("/api/upload-image", methods=["POST"])
 def api_upload_image():
     """Generic Drive upload, reusable by anything that needs to store a screenshot —
