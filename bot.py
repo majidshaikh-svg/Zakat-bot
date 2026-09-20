@@ -2715,29 +2715,58 @@ def _sync_ledger_book(person_id, book_id, sheet_id, sheet_tab, currency):
 
 @flask_app.route("/api/ledger/charity-audit/<int:book_id>", methods=["GET"])
 def api_ledger_charity_audit(book_id):
-    """Read-only audit of the latest 20 PKR debit transactions against Charity Google Sheet."""
+    """Read-only audit of the latest 20 PKR expenses against the Charity Google Sheet."""
     try:
+        import re
+        from difflib import SequenceMatcher
+
         books = sb_get("ledger_books", f"id=eq.{book_id}")
         if not books:
             return jsonify({"error": "Book not found"}), 404
-        book = books[0]
-        if (book.get("currency") or "").upper() != "PKR":
+        if (books[0].get("currency") or "").upper() != "PKR":
             return jsonify({"error": "Charity audit is currently available for PKR only"}), 400
 
         ledger = sb_get("ledger_entries", f"book_id=eq.{book_id}&debit_amount=gt.0&order=row_index.desc&limit=20&select=id,row_index,debit_date,debit_desc,debit_amount,debit_category,debit_sub_type,charity_status,charity_txn_id")
         rows = get_rows()
+
+        def parse_charity_row(row, sheet_row):
+            if len(row) < 6:
+                return None
+            txn_id = str(row[0]).strip() if len(row) > 0 and str(row[0]).strip().startswith("TXN-") else ""
+            date = str(row[1]).strip() if len(row) > 1 else ""
+            try:
+                amount = float(str(row[2]).replace(",", "").replace(" ", ""))
+            except:
+                return None
+            category = str(row[4]).strip() if len(row) > 4 else ""
+            details = str(row[5]).strip() if len(row) > 5 else ""
+            if not category or not details or amount <= 0:
+                return None
+            return {"txn_id": txn_id, "date": date, "amount": amount, "category": category, "details": details, "sheet_row": sheet_row, "reference": txn_id or f"ROW-{sheet_row}"}
+
         charity = []
         for sheet_row, row in enumerate(rows[1:], start=2):
-            if len(row) < 5:
-                continue
-            e = row_to_entry(row)
-            if not e:
-                continue
-            e["sheet_row"] = sheet_row
-            e["reference"] = e.get("txn_id") or f"ROW-{sheet_row}"
-            charity.append(e)
+            x = parse_charity_row(row, sheet_row)
+            if x:
+                charity.append(x)
 
-        audit, claude_jobs = [], []
+        def norm(s):
+            s = re.sub(r"[^A-Z0-9]+", " ", str(s or "").upper())
+            return " ".join(s.split())
+
+        def score_match(desc, candidate):
+            a, b = norm(desc), norm(candidate.get("details"))
+            ratio = SequenceMatcher(None, a, b).ratio()
+            ta, tb = set(a.split()), set(b.split())
+            overlap = len(ta & tb) / max(1, len(ta | tb))
+            # Exact/contained wording is very strong for historical ledger descriptions.
+            if a == b:
+                return 1.0
+            if a and b and (a in b or b in a):
+                return max(ratio, 0.94)
+            return max(ratio, overlap)
+
+        audit = []
         for e in ledger:
             amount = float(e.get("debit_amount") or 0)
             base = {"ledger_entry_id": e["id"], "row_index": e.get("row_index"), "description": e.get("debit_desc") or "", "amount": amount, "category": e.get("debit_category"), "sub_category": e.get("debit_sub_type"), "reference": None, "match": None}
@@ -2746,52 +2775,19 @@ def api_ledger_charity_audit(book_id):
             if existing_ref:
                 audit.append({**base, "state": "linked", "reference": existing_ref})
                 continue
-            if status == "dismissed":
-                audit.append({**base, "state": "excluded"})
-                continue
+            # Historical dismissed flags pre-date this audit and must not silently count as Excluded.
+            # Only an explicit decision from this audit should become excluded/mismatch.
             if status == "mismatch":
                 audit.append({**base, "state": "mismatch"})
                 continue
 
-            item = {**base, "state": "no_match"}
-            audit.append(item)
-            candidates = [x for x in charity if abs(float(x.get("amount") or 0) - amount) < 0.01]
-            if candidates:
-                claude_jobs.append({
-                    "ledger_entry_id": e["id"],
-                    "ledger": {"description": e.get("debit_desc") or "", "amount": amount, "category": e.get("debit_category") or "", "sub_category": e.get("debit_sub_type") or "", "date": e.get("debit_date") or ""},
-                    "candidates": [{"reference": x["reference"], "txn_id": x.get("txn_id") or "", "sheet_row": x["sheet_row"], "date": x.get("date") or "", "amount": x.get("amount"), "category": x.get("category") or "", "details": x.get("details") or ""} for x in candidates[:12]]
-                })
-
-        if claude_jobs:
-            prompt = """You reconcile personal Ledger expenses to an existing Charity ledger.
-For each Ledger item, choose a candidate ONLY when it is clearly the same real transaction.
-Amount is already exact. Use description, recipient/purpose, category/subcategory and date/period wording.
-Do not force a match merely because amounts are equal.
-Return JSON only: {"matches":[{"ledger_entry_id":123,"reference":"TXN-1 or ROW-10","confidence":"high|medium","reason":"brief"}]}.
-Omit any ledger item with no credible candidate.
-
-DATA:
-""" + json.dumps(claude_jobs, default=str)
-            try:
-                msg = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2500, messages=[{"role": "user", "content": prompt}])
-                raw = msg.content[0].text.strip()
-                if raw.startswith("~~~"):
-                    raw = raw.split("\n", 1)[1].rsplit("~~~", 1)[0].strip()
-                chosen = json.loads(raw).get("matches", [])
-                chosen_map = {int(x["ledger_entry_id"]): x for x in chosen if x.get("reference")}
-                candidate_map = {(j["ledger_entry_id"], x["reference"]): x for j in claude_jobs for x in j["candidates"]}
-                for item in audit:
-                    ch = chosen_map.get(int(item["ledger_entry_id"]))
-                    if not ch:
-                        continue
-                    candidate = candidate_map.get((item["ledger_entry_id"], ch["reference"]))
-                    if candidate:
-                        item["state"] = "match_found"
-                        item["reference"] = ch["reference"]
-                        item["match"] = {**candidate, "confidence": ch.get("confidence"), "reason": ch.get("reason")}
-            except Exception as ex:
-                logger.warning(f"Ledger Charity audit Claude matching failed: {ex}")
+            candidates = [x for x in charity if abs(float(x["amount"]) - amount) < 0.01]
+            ranked = sorted([(score_match(e.get("debit_desc"), x), x) for x in candidates], key=lambda z: z[0], reverse=True)
+            if ranked and ranked[0][0] >= 0.58:
+                sc, x = ranked[0]
+                audit.append({**base, "state": "match_found", "reference": x["reference"], "match": {**x, "confidence": "high" if sc >= 0.82 else "medium", "reason": "Exact amount with matching description/purpose"}})
+            else:
+                audit.append({**base, "state": "no_match"})
 
         summary = {"total": len(audit)}
         for state in ["match_found", "no_match", "linked", "excluded", "mismatch"]:
