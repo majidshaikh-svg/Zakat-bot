@@ -2914,90 +2914,103 @@ def api_ledger_verify_balance(book_id):
 
 @flask_app.route("/api/ledger/pending/<int:pending_id>/approve", methods=["POST"])
 def api_ledger_pending_approve(pending_id):
-    """Approve a sync pending entry — move it to ledger_entries as a confirmed transaction."""
-    import datetime
+    """Approve a sync entry. Charity entries are duplicate-checked before any Charity write."""
+    import datetime, re
+    from difflib import SequenceMatcher
     try:
         now = datetime.datetime.utcnow().isoformat() + "Z"
+        body = request.get_json(silent=True) or {}
+        confirm_charity_ref = body.get("confirm_charity_ref")
 
-        # Fetch the pending entry
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
-            headers=SB_HEADERS
-        )
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}", headers=SB_HEADERS)
         entries = r.json()
         if not entries:
             return jsonify({"error": "Pending entry not found"}), 404
         p = entries[0]
 
-        # Parse the stored raw data from notes field
-        notes = p.get("notes", "")
-        raw = {}
+        notes, raw = p.get("notes", ""), {}
         for part in notes.split("|"):
             if "=" in part:
-                k, v = part.split("=", 1)
-                raw[k.strip()] = v.strip()
+                k, v = part.split("=", 1); raw[k.strip()] = v.strip()
+        debit_desc = raw.get("debit_desc") or None
+        credit_desc = raw.get("credit_desc") or None
+        debit_amount = float(raw.get("debit_amt", 0) or 0)
+        credit_amt = float(raw.get("credit_amt", 0) or 0)
+        balance = float(raw.get("balance", 0) or 0)
+        sheet_row = p.get("sheet_row_index")
+        category = p.get("category")
+        sub_category = body.get("sub_category") or p.get("sub_category")
+        is_charity = category == "Charity"
+        desc = debit_desc or credit_desc or p.get("name") or p.get("description") or ""
+        amount = debit_amount or credit_amt or float(p.get("amount") or 0)
 
-        debit_desc   = raw.get("debit_desc")  or None
-        credit_desc  = raw.get("credit_desc") or None
-        debit_amount = float(raw.get("debit_amt",  0) or 0)
-        credit_amt   = float(raw.get("credit_amt", 0) or 0)
-        balance      = float(raw.get("balance",    0) or 0)
-        sheet_row    = p.get("sheet_row_index")
+        def norm(s):
+            return " ".join(re.sub(r"[^A-Z0-9]+", " ", str(s or "").upper()).split())
 
-        # Create confirmed ledger_entries row
-        entry_r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/ledger_entries",
-            headers={**SB_HEADERS, "Prefer": "return=representation"},
-            json={
-                "person_id":      p["person_id"],
-                "book_id":        p["book_id"],
-                "row_index":      sheet_row,
-                "debit_desc":     debit_desc,
-                "debit_amount":   debit_amount,
-                "credit_desc":    credit_desc,
-                "credit_amount":  credit_amt,
-                "balance":        balance,
-                "first_synced_at": now,
-                "last_synced_at":  now,
-                "credit_category": p.get("category") if credit_desc else None,
-                "debit_category":  p.get("category") if debit_desc else None,
-            }
-        )
+        def charity_candidates():
+            out = []
+            for sr, row in enumerate(get_rows()[1:], start=2):
+                if len(row) < 6: continue
+                try: amt = float(str(row[2]).replace(",", "").replace(" ", ""))
+                except: continue
+                if abs(amt - amount) >= 0.01: continue
+                txn = str(row[0]).strip() if str(row[0]).strip().startswith("TXN-") else ""
+                cat = str(row[4]).strip()
+                details = str(row[5]).strip()
+                if sub_category and cat.lower() != str(sub_category).lower(): continue
+                a, b = norm(desc), norm(details)
+                ratio = SequenceMatcher(None, a, b).ratio()
+                ta, tb = set(a.split()), set(b.split())
+                overlap = len(ta & tb) / max(1, len(ta | tb))
+                score = 1.0 if a == b else max(ratio, overlap, 0.94 if a and b and (a in b or b in a) else 0)
+                if score >= 0.58:
+                    out.append((score, {"reference": txn or f"ROW-{sr}", "txn_id": txn, "sheet_row": sr, "date": str(row[1]).strip(), "amount": amt, "category": cat, "details": details}))
+            return sorted(out, key=lambda x: x[0], reverse=True)
+
+        # Duplicate protection happens before Ledger approval. A credible existing
+        # Charity record requires explicit confirmation; nothing new is created.
+        if is_charity and not confirm_charity_ref:
+            matches = charity_candidates()
+            if matches:
+                score, m = matches[0]
+                return jsonify({"status": "charity_match_found", "requires_confirmation": True, "match": {**m, "confidence": "high" if score >= .82 else "medium"}}), 409
+
+        charity_ref = confirm_charity_ref if is_charity else None
+        charity_created = False
+        if is_charity and not charity_ref:
+            if not sub_category:
+                return jsonify({"error": "Charity sub category is required"}), 400
+            charity_date = p.get("date_performed") or datetime.date.today().isoformat()
+            txn_id, new_row = append_entry(charity_date, amount, sub_category, desc, raw_message=f"Ledger approval #{pending_id}", input_type="ledger")
+            charity_ref = txn_id or (f"ROW-{new_row}" if new_row else None)
+            if not charity_ref:
+                return jsonify({"error": "Charity transaction saved but no transaction reference was returned"}), 500
+            charity_created = True
+
+        entry_payload = {
+            "person_id": p["person_id"], "book_id": p["book_id"], "row_index": sheet_row,
+            "debit_desc": debit_desc, "debit_amount": debit_amount, "credit_desc": credit_desc,
+            "credit_amount": credit_amt, "balance": balance, "first_synced_at": now, "last_synced_at": now,
+            "credit_category": category if credit_desc else None, "debit_category": category if debit_desc else None,
+            "credit_sub_type": sub_category if credit_desc and is_charity else None,
+            "debit_sub_type": sub_category if debit_desc and is_charity else None,
+            "charity_status": "added" if is_charity else "none",
+            "charity_txn_id": charity_ref if is_charity else None,
+            "charity_decided_at": now if is_charity else None,
+        }
+        entry_r = requests.post(f"{SUPABASE_URL}/rest/v1/ledger_entries", headers={**SB_HEADERS, "Prefer": "return=representation"}, json=entry_payload)
         if not entry_r.ok:
             return jsonify({"error": f"Failed to create ledger entry: {entry_r.text}"}), 500
-
         new_entry_id = (entry_r.json() or [{}])[0].get("id")
 
-        # Update pending entry to matched
-        requests.patch(
-            f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}",
-            headers={**SB_HEADERS, "Prefer": "return=minimal"},
-            json={
-                "status":            "matched",
-                "matched_at":        now,
-                "matched_entry_id":  new_entry_id,
-                "matched_sheet_row": sheet_row,
-                "matched_by":        "manual",
-            }
-        )
-
-        # If this sync entry was suggested as a match for a manual entry, close that too
+        requests.patch(f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{pending_id}", headers={**SB_HEADERS, "Prefer": "return=minimal"}, json={"status":"matched","matched_at":now,"matched_entry_id":new_entry_id,"matched_sheet_row":sheet_row,"matched_by":"manual"})
         suggested_manual_id = p.get("suggested_manual_id")
         if suggested_manual_id:
-            requests.patch(
-                f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{suggested_manual_id}",
-                headers={**SB_HEADERS, "Prefer": "return=minimal"},
-                json={
-                    "status":            "matched",
-                    "matched_at":        now,
-                    "matched_entry_id":  new_entry_id,
-                    "matched_sheet_row": sheet_row,
-                    "matched_by":        "auto",
-                }
-            )
+            requests.patch(f"{SUPABASE_URL}/rest/v1/ledger_pending_entries?id=eq.{suggested_manual_id}", headers={**SB_HEADERS, "Prefer": "return=minimal"}, json={"status":"matched","matched_at":now,"matched_entry_id":new_entry_id,"matched_sheet_row":sheet_row,"matched_by":"auto"})
 
-        return jsonify({"status": "ok", "ledger_entry_id": new_entry_id})
+        return jsonify({"status":"ok","ledger_entry_id":new_entry_id,"charity": ({"reference":charity_ref,"txn_id":charity_ref if str(charity_ref).startswith("TXN-") else None,"created":charity_created} if is_charity else None)})
     except Exception as e:
+        logger.exception("Ledger pending approval failed")
         return jsonify({"error": str(e)}), 500
 
 
